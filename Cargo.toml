@@ -1,0 +1,20 @@
+[package]
+name = "gpt"
+authors = ["Hei <xuboyu72@gmail.com>"]
+version = "1.0.0"
+edition = "2021"
+description = "A GPT Proxy"
+
+[[bin]]
+name = "gpt"
+
+[dependencies]
+webpki-roots = "*"
+thiserror = "2.0"
+rustls = "*"
+rustls-pki-types = "*"
+crossbeam = "0.8.4"
+signal-hook = "0.3.17"
+serde = { version = "1.0.218", features = ["derive"] }
+serde_yaml = "0.9.34"
+clap = { version = "4.5.31", features = ["derive"] }
