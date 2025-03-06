@@ -105,7 +105,11 @@ impl<'a> Payload<'a> {
         ) -> Result<(Vec<usize>, usize), Error> {
             let mut n = 0;
             loop {
-                n += stream.read(&mut block[n..])?;
+                n += match stream.read(&mut block[n..]) {
+                    Ok(0) => return Err(Error::InvalidHeader),
+                    Ok(n) => n,
+                    Err(e) => return Err(e.into()),
+                };
                 if let Some(crlfs) = find_crlfs(&block[..n]) {
                     return Ok((crlfs, n));
                 } else {
