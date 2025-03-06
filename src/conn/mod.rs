@@ -15,13 +15,6 @@ static TLS_CLIENT_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(||
     Arc::new(config)
 });
 
-static TLS_SERVER_NAME: LazyLock<rustls_pki_types::ServerName<'static>> = LazyLock::new(|| {
-    let Ok(server_name) = crate::args().host.as_str().try_into() else {
-        unreachable!();
-    };
-    server_name
-});
-
 type TlsIncomingStream<'a> = rustls::Stream<'a, rustls::ServerConnection, TcpStream>;
 type TlsOutgoingStream<'a> = rustls::Stream<'a, rustls::ClientConnection, TcpStream>;
 
@@ -60,6 +53,10 @@ impl Pool {
         incoming
             .sock
             .set_read_timeout(Some(time::Duration::from_secs(30)))
+            .map_err(|e| ProxyError::Client(e.into()))?;
+        incoming
+            .sock
+            .set_write_timeout(Some(time::Duration::from_secs(30)))
             .map_err(|e| ProxyError::Client(e.into()))?;
         loop {
             let mut request = match http::Request::new(&mut incoming) {
@@ -118,7 +115,10 @@ impl Pool {
 }
 
 fn new_tls_client() -> Result<rustls::ClientConnection, Error> {
-    let client = rustls::ClientConnection::new(TLS_CLIENT_CONFIG.clone(), TLS_SERVER_NAME.clone())?;
+    let client = rustls::ClientConnection::new(
+        TLS_CLIENT_CONFIG.clone(),
+        crate::args().tls_server_name.clone(),
+    )?;
     Ok(client)
 }
 

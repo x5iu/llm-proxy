@@ -3,6 +3,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use std::time;
 
 use clap::{Parser, Subcommand};
 
@@ -31,18 +32,19 @@ enum Command {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let gpt = GPT::parse();
-    match &gpt.command {
+    match gpt.command {
         Some(Command::Start { config }) => start(config)?,
         _ => (),
     }
     Ok(())
 }
 
-fn start(config: &PathBuf) -> Result<(), Box<dyn Error>> {
-    gpt::load_config(config)?;
+fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
+    gpt::load_config(&config)?;
     let mut signals = SignalsInfo::<SignalOnly>::new([signal::SIGTERM, signal::SIGINT])?;
     let executor = Arc::new(Executor::new());
     run_background(Arc::clone(&executor));
+    watch_config(config);
     for signal in &mut signals {
         match signal {
             signal::SIGTERM | signal::SIGINT => break,
@@ -60,5 +62,12 @@ fn run_background(executor: Arc<Executor>) {
             let stream = incoming.unwrap();
             executor.execute(stream);
         }
+    });
+}
+
+fn watch_config(path: PathBuf) {
+    thread::spawn(move || loop {
+        thread::sleep(time::Duration::from_secs(5));
+        let _ = gpt::update_config(&path);
     });
 }

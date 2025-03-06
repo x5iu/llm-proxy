@@ -7,14 +7,15 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pki_types::pem::PemObject;
 
-static PROG_ARGS: AtomicPtr<ProgArgs> = AtomicPtr::new(ptr::null_mut());
+static PROG_ARGS: AtomicPtr<Arc<ProgArgs>> = AtomicPtr::new(ptr::null_mut());
 
-fn args() -> &'static ProgArgs {
-    unsafe { &*PROG_ARGS.load(std::sync::atomic::Ordering::SeqCst) }
+fn args() -> Arc<ProgArgs> {
+    unsafe { Arc::clone(&*PROG_ARGS.load(std::sync::atomic::Ordering::SeqCst)) }
 }
 
 #[derive(serde::Deserialize)]
@@ -26,25 +27,51 @@ struct Config<'a> {
     auth_keys: Vec<String>,
 }
 
-pub fn load_config(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
-    let config_str = fs::read_to_string(path)?;
+pub fn load_config(
+    path: impl AsRef<Path>,
+) -> Result<*mut Arc<ProgArgs>, Box<dyn std::error::Error>> {
+    let metadata = fs::metadata(&path)?;
+    let config_str = fs::read_to_string(&path)?;
     let config: Config = serde_yaml::from_str(&config_str)?;
-    let args = ProgArgs::from_config(config)?;
-    PROG_ARGS.store(Box::into_raw(Box::new(args)), Ordering::SeqCst);
+    let args = ProgArgs::from_config(config, metadata.modified()?)?;
+    Ok(PROG_ARGS.swap(Box::into_raw(Box::new(Arc::new(args))), Ordering::SeqCst))
+}
+
+pub fn update_config(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = fs::metadata(&path)?;
+    if metadata.modified()? > args().last_modified {
+        unsafe {
+            let ori_ptr = load_config(path)?;
+            drop(Box::from_raw(ori_ptr));
+        }
+    }
     Ok(())
 }
 
 pub struct ProgArgs {
     tls_server_config: Arc<rustls::ServerConfig>,
-    host: String,
+    tls_server_name: rustls_pki_types::ServerName<'static>,
     addr: String,
-    host_header: String,
-    auth_header: String,
+    host_header: &'static str,
+    auth_header: &'static str,
     auth_keys: Vec<String>,
+    last_modified: SystemTime,
+}
+
+impl Drop for ProgArgs {
+    fn drop(&mut self) {
+        unsafe {
+            drop(Box::from_raw(self.host_header as *const str as *mut str));
+            drop(Box::from_raw(self.auth_header as *const str as *mut str));
+        }
+    }
 }
 
 impl ProgArgs {
-    fn from_config(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+    fn from_config(
+        config: Config,
+        last_modified: SystemTime,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let certs =
             CertificateDer::pem_file_iter(config.cert_file)?.collect::<Result<Vec<_>, _>>()?;
         let private_key = PrivateKeyDer::from_pem_file(config.private_key_file)?;
@@ -61,11 +88,12 @@ impl ProgArgs {
         auth_header.push_str("\r\n");
         Ok(Self {
             tls_server_config: Arc::new(tls_server_config),
-            host: config.host.to_string(),
+            tls_server_name: config.host.to_string().try_into()?,
             addr,
-            host_header,
-            auth_header,
+            host_header: Box::leak(host_header.into_boxed_str()),
+            auth_header: Box::leak(auth_header.into_boxed_str()),
             auth_keys: config.auth_keys,
+            last_modified,
         })
     }
 
