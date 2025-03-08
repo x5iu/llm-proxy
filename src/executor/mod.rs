@@ -7,8 +7,9 @@ use std::time;
 
 use crossbeam::channel::SendTimeoutError;
 use crossbeam::channel::{Receiver, Sender};
+use crossbeam::deque::Injector;
 
-use crate::conn::{Pool, ProxyError};
+use crate::conn::{Conn, Pool, ProxyError};
 
 enum Task {
     TcpStream(TcpStream),
@@ -19,6 +20,7 @@ pub struct Executor {
     sender: Sender<Task>,
     receiver: Receiver<Task>,
     workers: Mutex<Option<Vec<Worker>>>,
+    conn_injector: Arc<Injector<Conn>>,
 }
 
 impl Executor {
@@ -28,6 +30,7 @@ impl Executor {
             sender,
             receiver,
             workers: Mutex::new(Some(Vec::with_capacity(4))),
+            conn_injector: Arc::new(Injector::new()),
         }
     }
 
@@ -42,7 +45,8 @@ impl Executor {
                 Err(SendTimeoutError::Timeout(Task::TcpStream(stream))) => {
                     slot.replace(stream);
                     self.cleanup();
-                    let worker = Worker::new(self.receiver.clone());
+                    let worker =
+                        Worker::new(self.receiver.clone(), Arc::clone(&self.conn_injector));
                     let Ok(mut workers) = self.workers.lock() else {
                         unreachable!();
                     };
@@ -87,11 +91,11 @@ struct Worker {
 }
 
 impl Worker {
-    pub fn new(receiver: Receiver<Task>) -> Self {
+    pub fn new(receiver: Receiver<Task>, conn_injector: Arc<Injector<Conn>>) -> Self {
         let is_dead = Arc::new(AtomicBool::new(false));
         let is_dead_flag = Arc::clone(&is_dead);
         let join_handle = thread::spawn(move || {
-            let mut pool = Pool::new();
+            let mut pool = Pool::new(conn_injector);
             while let Ok(Task::TcpStream(mut stream)) =
                 receiver.recv_timeout(time::Duration::from_secs(30))
             {

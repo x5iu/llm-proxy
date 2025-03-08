@@ -3,6 +3,8 @@ use std::net::TcpStream;
 use std::sync::{Arc, LazyLock};
 use std::time;
 
+use crossbeam::deque::{Injector, Steal};
+
 use crate::http;
 use crate::Error;
 
@@ -27,28 +29,30 @@ pub enum ProxyError {
 }
 
 pub struct Pool {
-    conns: Vec<Conn>,
+    injector: Arc<Injector<Conn>>,
 }
 
 impl Pool {
-    pub fn new() -> Self {
-        Self {
-            conns: Vec::with_capacity(4),
-        }
+    pub fn new(injector: Arc<Injector<Conn>>) -> Self {
+        Self { injector }
     }
 
     pub fn proxy(&mut self, mut incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
+        #[inline]
+        fn new_outgoing_conn() -> Result<Conn, ProxyError> {
+            let stream = TcpStream::connect(&crate::args().addr)
+                .map_err(|e| ProxyError::Server(e.into()))?;
+            let client = new_tls_client().map_err(ProxyError::Server)?;
+            let conn = Conn::new(stream, client);
+            Ok(conn)
+        }
         let mut conn_keep_alive = true;
         let mut is_invalid_key = false;
         let mut is_bad_request = false;
         let mut outgoing = if let Some(conn) = self.select() {
             conn
         } else {
-            let stream = TcpStream::connect(&crate::args().addr)
-                .map_err(|e| ProxyError::Server(e.into()))?;
-            let client = new_tls_client().map_err(ProxyError::Server)?;
-            let conn = Conn::new(stream, client);
-            conn
+            new_outgoing_conn()?
         };
         incoming
             .sock
@@ -93,6 +97,9 @@ impl Pool {
             if !incoming_conn_keep_alive {
                 break;
             }
+            if !conn_keep_alive {
+                outgoing = new_outgoing_conn()?;
+            }
         }
         if conn_keep_alive {
             self.add(outgoing);
@@ -124,12 +131,12 @@ fn new_tls_client() -> Result<rustls::ClientConnection, Error> {
 
 impl Pool {
     fn add(&mut self, conn: Conn) {
-        self.conns.push(conn);
+        self.injector.push(conn);
     }
 
     fn select(&mut self) -> Option<Conn> {
         loop {
-            let Some(mut conn) = self.conns.pop() else {
+            let Steal::Success(mut conn) = self.injector.steal() else {
                 return None;
             };
             if conn.health_check().is_ok() {
