@@ -54,6 +54,10 @@ impl Pool {
             .sock
             .set_read_timeout(Some(time::Duration::from_secs(30)))
             .map_err(|e| ProxyError::Client(e.into()))?;
+        incoming
+            .sock
+            .set_write_timeout(Some(time::Duration::from_secs(30)))
+            .map_err(|e| ProxyError::Client(e.into()))?;
         loop {
             let mut request = match http::Request::new(&mut incoming) {
                 Ok(request) => request,
@@ -150,13 +154,41 @@ impl Conn {
     pub fn health_check(&mut self) -> Result<(), Error> {
         self.tls_stream.sock.set_nonblocking(true)?;
         match self.tls_stream.read(&mut [0; 1]) {
-            Ok(0) => Err(Error::IO(io::Error::new(io::ErrorKind::NotConnected, ""))),
-            Err(e) if e.kind() != io::ErrorKind::WouldBlock => Err(e.into()),
+            Ok(0) => return Err(Error::IO(io::Error::new(io::ErrorKind::NotConnected, ""))),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => (),
+            Err(e) => return Err(e.into()),
             _ => {
-                self.tls_stream.sock.set_nonblocking(false)?;
-                Ok(())
+                return Err(Error::IO(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "",
+                )))
             }
         }
+        self.tls_stream.sock.set_nonblocking(false)?;
+        let (ori_read_timeout, ori_write_timeout) = (
+            self.tls_stream.sock.read_timeout()?,
+            self.tls_stream.sock.write_timeout()?,
+        );
+        self.tls_stream
+            .sock
+            .set_read_timeout(Some(time::Duration::from_millis(200)))?;
+        self.tls_stream
+            .sock
+            .set_write_timeout(Some(time::Duration::from_millis(200)))?;
+        self.tls_stream.write_all(b"GET / HTTP/1.1\r\n")?;
+        self.tls_stream
+            .write_all(crate::args().host_header.as_bytes())?;
+        self.tls_stream
+            .write_all(crate::args().auth_header.as_bytes())?;
+        self.tls_stream
+            .write_all(b"Connection: keep-alive\r\n\r\n")?;
+        self.tls_stream.flush()?;
+        let mut response = http::Response::new(&mut self.tls_stream)?;
+        response.write_to(&mut io::empty())?;
+        drop(response);
+        self.tls_stream.sock.set_read_timeout(ori_read_timeout)?;
+        self.tls_stream.sock.set_write_timeout(ori_write_timeout)?;
+        Ok(())
     }
 }
 
