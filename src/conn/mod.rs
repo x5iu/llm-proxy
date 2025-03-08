@@ -54,10 +54,6 @@ impl Pool {
             .sock
             .set_read_timeout(Some(time::Duration::from_secs(30)))
             .map_err(|e| ProxyError::Client(e.into()))?;
-        incoming
-            .sock
-            .set_write_timeout(Some(time::Duration::from_secs(30)))
-            .map_err(|e| ProxyError::Client(e.into()))?;
         loop {
             let mut request = match http::Request::new(&mut incoming) {
                 Ok(request) => request,
