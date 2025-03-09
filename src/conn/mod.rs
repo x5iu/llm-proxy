@@ -26,6 +26,8 @@ pub enum ProxyError {
     Client(Error),
     #[error("Server error: {0}")]
     Server(Error),
+    #[error("Abort: {0}")]
+    Abort(Error),
 }
 
 pub struct Pool {
@@ -39,10 +41,11 @@ impl Pool {
 
     pub fn proxy(&mut self, mut incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
         #[inline]
-        fn new_outgoing_conn() -> Result<Conn, ProxyError> {
-            let stream = TcpStream::connect(&crate::args().addr)
-                .map_err(|e| ProxyError::Server(e.into()))?;
-            let client = new_tls_client().map_err(ProxyError::Server)?;
+        fn new_outgoing_conn() -> Result<Conn, Error> {
+            let stream = TcpStream::connect(&crate::args().addr)?;
+            stream.set_read_timeout(Some(time::Duration::from_secs(30)))?;
+            stream.set_write_timeout(Some(time::Duration::from_secs(30)))?;
+            let client = new_tls_client()?;
             let conn = Conn::new(stream, client);
             Ok(conn)
         }
@@ -52,7 +55,7 @@ impl Pool {
         let mut outgoing = if let Some(conn) = self.select() {
             conn
         } else {
-            new_outgoing_conn()?
+            new_outgoing_conn().map_err(ProxyError::Server)?
         };
         incoming
             .sock
@@ -88,17 +91,17 @@ impl Pool {
                 .map_err(ProxyError::Server)?;
             let incoming_conn_keep_alive = request.payload.conn_keep_alive;
             drop(request);
-            let mut response = http::Response::new(&mut outgoing).map_err(ProxyError::Server)?;
+            let mut response = http::Response::new(&mut outgoing).map_err(ProxyError::Abort)?;
             response
                 .write_to(&mut incoming)
-                .map_err(ProxyError::Client)?;
+                .map_err(ProxyError::Abort)?;
             conn_keep_alive = response.payload.conn_keep_alive;
             drop(response);
             if !incoming_conn_keep_alive {
                 break;
             }
             if !conn_keep_alive {
-                outgoing = new_outgoing_conn()?;
+                outgoing = new_outgoing_conn().map_err(ProxyError::Abort)?;
             }
         }
         if conn_keep_alive {

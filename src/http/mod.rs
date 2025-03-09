@@ -70,15 +70,21 @@ impl<'a> Response<'a> {
     }
 
     pub fn write_to<W: Write>(&mut self, writer: &mut W) -> Result<(), Error> {
+        #[cfg(debug_assertions)]
+        let mut payload_blocks = Vec::new();
         loop {
             let Some(block) = self.payload.next_block()? else {
                 break;
             };
             if block.len() > 0 {
+                #[cfg(debug_assertions)]
+                payload_blocks.push(block.to_vec());
                 writer.write_all(block)?;
             }
         }
         writer.flush()?;
+        #[cfg(debug_assertions)]
+        log::info!(payload:serde = payload_blocks; "http_payload_blocks");
         Ok(())
     }
 }
@@ -192,10 +198,14 @@ impl<'a> Payload<'a> {
             }
         } else {
             if transfer_encoding_chunked {
-                let already_read =
-                    Cursor::new(block[header_length + CRLF.len()..first_block_length].to_vec());
-                first_block_length = header_length + CRLF.len();
-                Body::Unread(Box::new(ChunkedReader::new(already_read.chain(stream))))
+                let (start, end) = (header_length + CRLF.len(), first_block_length);
+                first_block_length = start;
+                if start < end {
+                    let already_read = Cursor::new(block[start..end].to_vec());
+                    Body::Unread(Box::new(ChunkedReader::new(already_read.chain(stream))))
+                } else {
+                    Body::Unread(Box::new(ChunkedReader::new(stream)))
+                }
             } else {
                 Body::Read(0..0)
             }
@@ -219,6 +229,8 @@ impl<'a> Payload<'a> {
             ReadState::Start => {
                 if self.header_current_chunk < self.header_chunks.len() {
                     if let Some(ref range) = self.header_chunks[self.header_current_chunk] {
+                        #[cfg(debug_assertions)]
+                        log::info!(step = "ReadState::Start"; "current_block:header_chunks({})", self.header_current_chunk);
                         self.header_current_chunk += 1;
                         return Ok(Some(&self.internal_buffer[range.start..range.end]));
                     }
@@ -229,6 +241,8 @@ impl<'a> Payload<'a> {
             ReadState::HostHeader => {
                 self.state = ReadState::AuthHeader;
                 if self.host_range.is_some() {
+                    #[cfg(debug_assertions)]
+                    log::info!(step = "ReadState::HostHeader"; "current_block:host_header");
                     Ok(Some(crate::args().host_header.as_bytes()))
                 } else {
                     self.next_block()
@@ -237,6 +251,8 @@ impl<'a> Payload<'a> {
             ReadState::AuthHeader => {
                 self.state = ReadState::ConnectionHeader;
                 if self.auth_range.is_some() {
+                    #[cfg(debug_assertions)]
+                    log::info!(step = "ReadState::AuthHeader"; "current_block:auth_header");
                     Ok(Some(crate::args().auth_header.as_bytes()))
                 } else {
                     self.next_block()
@@ -244,20 +260,30 @@ impl<'a> Payload<'a> {
             }
             ReadState::ConnectionHeader => {
                 self.state = ReadState::FinishHeader;
+                #[cfg(debug_assertions)]
+                log::info!(step = "ReadState::ConnectionHeader"; "current_block:connection_header");
                 Ok(Some(HEADER_CONNECTION_KEEP_ALIVE))
             }
             ReadState::FinishHeader => {
                 self.state = ReadState::ReadBody;
+                #[cfg(debug_assertions)]
+                log::info!(step = "ReadState::FinishHeader"; "current_block:finish_header");
                 Ok(Some(CRLF))
             }
             ReadState::ReadBody => {
                 self.state = ReadState::UnreadBody;
                 match &self.body {
-                    Body::Read(range) => Ok(Some(&self.internal_buffer[range.start..range.end])),
+                    Body::Read(range) => {
+                        #[cfg(debug_assertions)]
+                        log::info!(step = "ReadState::ReadBody"; "current_block:total_body_already_been_read");
+                        Ok(Some(&self.internal_buffer[range.start..range.end]))
+                    }
                     Body::Unread(_) => {
                         let (start, end) =
                             (self.header_length + CRLF.len(), self.first_block_length);
                         if start < end {
+                            #[cfg(debug_assertions)]
+                            log::info!(step = "ReadState::ReadBody"; "current_block:body_already_been_read");
                             Ok(Some(&self.internal_buffer[start..end]))
                         } else {
                             self.next_block()
@@ -269,7 +295,11 @@ impl<'a> Payload<'a> {
                 if let Body::Unread(reader) = &mut self.body {
                     match reader.read(&mut self.internal_buffer) {
                         Ok(0) => Ok(None),
-                        Ok(n) => Ok(Some(&self.internal_buffer[..n])),
+                        Ok(n) => {
+                            #[cfg(debug_assertions)]
+                            log::info!(step = "ReadState::UnreadBody"; "current_block:body_in_stream");
+                            Ok(Some(&self.internal_buffer[..n]))
+                        }
                         Err(e) => Err(e.into()),
                     }
                 } else {

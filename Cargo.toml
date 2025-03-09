@@ -1,7 +1,7 @@
 [package]
 name = "gpt"
 authors = ["Hei <xuboyu72@gmail.com>"]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 description = "A GPT Proxy"
 
@@ -18,3 +18,5 @@ signal-hook = "0.3.17"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_yaml = "0.9.34"
 clap = { version = "4.5.31", features = ["derive"] }
+log = "0.4.26"
+structured-logger = "1.0.3"

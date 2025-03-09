@@ -3,6 +3,7 @@ pub mod executor;
 pub mod http;
 
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -11,6 +12,8 @@ use std::time::SystemTime;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pki_types::pem::PemObject;
+
+use structured_logger::json::new_writer;
 
 static PROG_ARGS: AtomicPtr<Arc<ProgArgs>> = AtomicPtr::new(ptr::null_mut());
 
@@ -33,6 +36,9 @@ pub fn load_config(
     let metadata = fs::metadata(&path)?;
     let config_str = fs::read_to_string(&path)?;
     let config: Config = serde_yaml::from_str(&config_str)?;
+    structured_logger::Builder::with_level("INFO")
+        .with_target_writer("gpt*", new_writer(io::stderr()))
+        .init();
     let args = ProgArgs::from_config(config, metadata.modified()?)?;
     Ok(PROG_ARGS.swap(Box::into_raw(Box::new(Arc::new(args))), Ordering::SeqCst))
 }

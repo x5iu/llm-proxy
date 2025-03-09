@@ -1,4 +1,6 @@
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, Read};
+
+use buf_reader::BufReader;
 
 pub struct LimitedReader<R> {
     reader: R,
@@ -37,26 +39,44 @@ pub struct ChunkedReader<R> {
 impl<R: Read> ChunkedReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            reader: BufReader::with_capacity(4096, reader),
+            reader: BufReader::new(reader, super::DEFAULT_BUFFER_SIZE),
             unread_chunk_length: 0,
             finished: false,
         }
     }
-}
 
-impl<R: Read> Read for ChunkedReader<R> {
-    fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
+    fn internal_read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
+        #[inline]
+        fn find_crlf(buffer: &[u8]) -> Option<usize> {
+            buffer.windows(2).position(|window| window == CRLF)
+        }
+        #[inline]
+        fn find_next_crlf<R: Read>(reader: &mut BufReader<R>) -> io::Result<usize> {
+            let mut buffer = reader.buffer();
+            if let Some(idx) = find_crlf(buffer) {
+                return Ok(idx);
+            }
+            let buffer_capacity = reader.capacity();
+            while buffer.len() < buffer_capacity {
+                buffer = reader.fill_buf()?;
+                if let Some(idx) = find_crlf(buffer) {
+                    return Ok(idx);
+                }
+            }
+            Err(io::Error::new(io::ErrorKind::Other, "header line too long"))
+        }
         use super::CRLF;
         let mut filled_bytes = 0;
-        while filled_bytes < buf.len() {
+        let total_buf_len = buf.len();
+        while filled_bytes < total_buf_len {
             if self.unread_chunk_length == 0 {
                 if self.finished {
                     break;
                 }
-                let buffer = self.reader.fill_buf()?;
-                let Some(idx) = buffer.windows(2).position(|window| window == CRLF) else {
-                    return Err(io::Error::new(io::ErrorKind::Other, "header line too long"));
-                };
+                let idx = find_next_crlf(&mut self.reader)?;
+                let buffer = self.reader.buffer();
+                #[cfg(debug_assertions)]
+                log::info!(buffer:serde = buffer.to_vec(), index = idx; "read_chunk_header_line");
                 self.unread_chunk_length = {
                     let Ok(length_str) = std::str::from_utf8(&buffer[..idx]) else {
                         return Err(io::Error::new(
@@ -83,9 +103,91 @@ impl<R: Read> Read for ChunkedReader<R> {
             if n == 0 {
                 break;
             }
+            buf = &mut buf[n..];
             self.unread_chunk_length -= n;
             filled_bytes += n;
         }
         Ok(filled_bytes)
+    }
+}
+
+impl<R: Read> Read for ChunkedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.internal_read(buf) {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                // This log is recorded to diagnose the `illegal chunk header` and `InvalidChunkLength` error.
+                log::error!(error = e.to_string(); "chunked_reader_error");
+                Err(e)
+            }
+        }
+    }
+}
+
+pub(crate) mod buf_reader {
+    use std::io::{self, BufRead, Read};
+
+    pub(crate) struct BufReader<R: ?Sized> {
+        buf: Vec<u8>,
+        inner: R,
+    }
+
+    impl<R: Read> BufReader<R> {
+        pub(crate) fn new(inner: R, size: usize) -> Self {
+            let buf = Vec::with_capacity(size);
+            Self { buf, inner }
+        }
+
+        pub(crate) fn capacity(&self) -> usize {
+            self.buf.capacity()
+        }
+
+        pub(crate) fn buffer(&self) -> &[u8] {
+            &self.buf[..]
+        }
+    }
+
+    impl<R: Read> Read for BufReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.len() == 0 {
+                return Ok(0);
+            }
+            if self.buf.len() == 0 {
+                return self.inner.read(buf);
+            }
+            let mut r = &self.buf[..];
+            match r.read(buf) {
+                Ok(0) => unreachable!(),
+                Err(e) => Err(e),
+                Ok(n) => {
+                    self.consume(n);
+                    Ok(n)
+                }
+            }
+        }
+    }
+
+    impl<R: Read> BufRead for BufReader<R> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            let (len, cap) = (self.buf.len(), self.buf.capacity());
+            if len < cap {
+                unsafe {
+                    self.buf.set_len(cap);
+                    let n = self.inner.read(&mut self.buf[len..cap])?;
+                    if n == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "unexpected EOF",
+                        ));
+                    }
+                    self.buf.set_len(len + n);
+                }
+            }
+            Ok(&self.buf[..])
+        }
+
+        fn consume(&mut self, amt: usize) {
+            self.buf.drain(..amt);
+        }
     }
 }

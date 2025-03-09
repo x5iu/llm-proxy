@@ -105,12 +105,23 @@ impl Worker {
                     unreachable!();
                 };
                 let mut tls_stream = rustls::Stream::new(&mut tls_server_conn, &mut stream);
-                if let Err(ProxyError::Server(_)) = pool.proxy(&mut tls_stream) {
-                    let _ = tls_stream
-                        .write_all(
+                match pool.proxy(&mut tls_stream) {
+                    Err(ProxyError::Abort(e)) => {
+                        log::error!(error = e.to_string(); "proxy_abort_error");
+                    }
+                    #[cfg(debug_assertions)]
+                    Err(ProxyError::Client(e)) => {
+                        log::warn!(error = e.to_string(); "proxy_client_error");
+                    }
+                    Err(ProxyError::Server(e)) => {
+                        log::error!(error = e.to_string(); "proxy_server_error");
+                        let _ = tls_stream.write_all(
                             b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         );
+                    }
+                    _ => (),
                 }
+                let _ = tls_stream.flush();
             }
             is_dead_flag.store(true, Ordering::SeqCst);
         });
