@@ -49,12 +49,16 @@ impl<'a> Request<'a> {
         Ok(())
     }
 
+    pub fn host(&self) -> Option<&str> {
+        self.payload.host()
+    }
+
+    pub fn host_header(&self) -> Option<&[u8]> {
+        self.payload.host_header()
+    }
+
     pub fn auth_header(&self) -> Option<&[u8]> {
-        if let Some(ref range) = self.payload.auth_range {
-            Some(&self.payload.internal_buffer[range.start..range.end])
-        } else {
-            None
-        }
+        self.payload.auth_header()
     }
 }
 
@@ -162,14 +166,6 @@ impl<'a> Payload<'a> {
                 };
                 header_chunks[0] = Some(start..start + line.len());
                 host_range = Some(start..start + line.len());
-            } else if is_header(header, HEADER_AUTHORIZATION) {
-                let start = {
-                    let block_start = &block[0] as *const u8 as usize;
-                    let auth_start = &line[0] as *const u8 as usize;
-                    auth_start - block_start
-                };
-                header_chunks[1] = Some(start..start + line.len());
-                auth_range = Some(start..start + line.len());
             } else if is_header(header, HEADER_CONNECTION) {
                 let start = {
                     let block_start = &block[0] as *const u8 as usize;
@@ -182,6 +178,31 @@ impl<'a> Payload<'a> {
                 }
             }
         }
+        if let Some(host) = get_host(
+            host_range
+                .as_ref()
+                .map(|range| &block[range.start..range.end]),
+        ) {
+            let prog_args = crate::args();
+            let Some(provider) = prog_args.select_provider(host) else {
+                return Err(Error::InvalidHeader);
+            };
+            let header_lines = HeaderLines::new(&crlfs, header);
+            for line in header_lines.skip(1) {
+                let Ok(header) = std::str::from_utf8(line) else {
+                    return Err(Error::InvalidHeader);
+                };
+                if is_header(header, provider.auth_header_key()) {
+                    let start = {
+                        let block_start = &block[0] as *const u8 as usize;
+                        let auth_start = &line[0] as *const u8 as usize;
+                        auth_start - block_start
+                    };
+                    header_chunks[1] = Some(start..start + line.len());
+                    auth_range = Some(start..start + line.len());
+                }
+            }
+        };
         let mut first_block_length = advanced;
         let header_length = header.len();
         let body = if let Some(real_content_length) = content_length {
@@ -224,6 +245,26 @@ impl<'a> Payload<'a> {
         })
     }
 
+    fn host(&self) -> Option<&str> {
+        get_host(self.host_header())
+    }
+
+    fn host_header(&self) -> Option<&[u8]> {
+        if let Some(ref range) = self.host_range {
+            Some(&self.internal_buffer[range.start..range.end])
+        } else {
+            None
+        }
+    }
+
+    fn auth_header(&self) -> Option<&[u8]> {
+        if let Some(ref range) = self.auth_range {
+            Some(&self.internal_buffer[range.start..range.end])
+        } else {
+            None
+        }
+    }
+
     fn next_block(&mut self) -> Result<Option<&[u8]>, Error> {
         match self.state {
             ReadState::Start => {
@@ -243,17 +284,25 @@ impl<'a> Payload<'a> {
                 if self.host_range.is_some() {
                     #[cfg(debug_assertions)]
                     log::info!(step = "ReadState::HostHeader"; "current_block:host_header");
-                    Ok(Some(crate::args().host_header.as_bytes()))
+                    let prog_args = crate::args();
+                    let Some(provider) = prog_args.select_provider(self.host().unwrap()) else {
+                        return Err(Error::InvalidHeader);
+                    };
+                    Ok(Some(provider.host_header().as_bytes()))
                 } else {
                     self.next_block()
                 }
             }
             ReadState::AuthHeader => {
                 self.state = ReadState::ConnectionHeader;
-                if self.auth_range.is_some() {
+                if self.auth_range.is_some() && self.host_range.is_some() {
                     #[cfg(debug_assertions)]
                     log::info!(step = "ReadState::AuthHeader"; "current_block:auth_header");
-                    Ok(Some(crate::args().auth_header.as_bytes()))
+                    let prog_args = crate::args();
+                    let Some(provider) = prog_args.select_provider(self.host().unwrap()) else {
+                        return Err(Error::InvalidHeader);
+                    };
+                    Ok(Some(provider.auth_header().as_bytes()))
                 } else {
                     self.next_block()
                 }
@@ -308,6 +357,20 @@ impl<'a> Payload<'a> {
             }
         }
     }
+}
+
+#[inline]
+fn get_host(header: Option<&[u8]>) -> Option<&str> {
+    header
+        .map(|header| std::str::from_utf8(header).ok())
+        .flatten()
+        .map(|host| {
+            if host[..HEADER_HOST.len()].eq_ignore_ascii_case(HEADER_HOST) {
+                &host[HEADER_HOST.len()..]
+            } else {
+                host
+            }
+        })
 }
 
 #[inline]

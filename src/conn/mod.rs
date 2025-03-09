@@ -6,6 +6,7 @@ use std::time;
 use crossbeam::deque::{Injector, Steal};
 
 use crate::http;
+use crate::provider::Provider;
 use crate::Error;
 
 static TLS_CLIENT_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
@@ -41,22 +42,20 @@ impl Pool {
 
     pub fn proxy(&mut self, mut incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
         #[inline]
-        fn new_outgoing_conn() -> Result<Conn, Error> {
-            let stream = TcpStream::connect(&crate::args().addr)?;
-            stream.set_read_timeout(Some(time::Duration::from_secs(30)))?;
-            stream.set_write_timeout(Some(time::Duration::from_secs(30)))?;
-            let client = new_tls_client()?;
-            let conn = Conn::new(stream, client);
-            Ok(conn)
+        fn get_outgoing_conn(provider: &dyn Provider, pool: &mut Pool) -> Result<Conn, Error> {
+            if let Some(conn) = pool.select(provider.endpoint()) {
+                Ok(conn)
+            } else {
+                let stream = TcpStream::connect(provider.sock_address())?;
+                stream.set_read_timeout(Some(time::Duration::from_secs(30)))?;
+                stream.set_write_timeout(Some(time::Duration::from_secs(30)))?;
+                let client = new_tls_client(provider)?;
+                let conn = Conn::new(provider.endpoint(), stream, client);
+                Ok(conn)
+            }
         }
-        let mut conn_keep_alive = true;
         let mut is_invalid_key = false;
         let mut is_bad_request = false;
-        let mut outgoing = if let Some(conn) = self.select() {
-            conn
-        } else {
-            new_outgoing_conn().map_err(ProxyError::Server)?
-        };
         incoming
             .sock
             .set_read_timeout(Some(time::Duration::from_secs(30)))
@@ -82,10 +81,22 @@ impl Pool {
                 }
                 Err(e) => return Err(ProxyError::Client(e)),
             };
-            if !crate::args().is_valid_key(request.auth_header()) {
+            let prog_args = crate::args();
+            let Some(host) = request.host() else {
+                is_bad_request = true;
+                break;
+            };
+            let Some(provider) = prog_args.select_provider(host) else {
+                is_bad_request = true;
+                break;
+            };
+            if !provider.authenticate(request.auth_header()).is_ok() {
+                #[cfg(debug_assertions)]
+                log::error!(provider = provider.kind().to_string(), header:serde = request.auth_header().map(|header| header.to_vec()); "authentication_failed");
                 is_invalid_key = true;
                 break;
             }
+            let mut outgoing = get_outgoing_conn(provider, self).map_err(ProxyError::Server)?;
             request
                 .write_to(&mut outgoing)
                 .map_err(ProxyError::Server)?;
@@ -95,17 +106,14 @@ impl Pool {
             response
                 .write_to(&mut incoming)
                 .map_err(ProxyError::Abort)?;
-            conn_keep_alive = response.payload.conn_keep_alive;
+            let conn_keep_alive = response.payload.conn_keep_alive;
             drop(response);
             if !incoming_conn_keep_alive {
                 break;
             }
-            if !conn_keep_alive {
-                outgoing = new_outgoing_conn().map_err(ProxyError::Abort)?;
+            if conn_keep_alive {
+                self.add(outgoing);
             }
-        }
-        if conn_keep_alive {
-            self.add(outgoing);
         }
         if is_invalid_key {
             incoming
@@ -124,11 +132,9 @@ impl Pool {
     }
 }
 
-fn new_tls_client() -> Result<rustls::ClientConnection, Error> {
-    let client = rustls::ClientConnection::new(
-        TLS_CLIENT_CONFIG.clone(),
-        crate::args().tls_server_name.clone(),
-    )?;
+fn new_tls_client(provider: &dyn Provider) -> Result<rustls::ClientConnection, Error> {
+    let client =
+        rustls::ClientConnection::new(TLS_CLIENT_CONFIG.clone(), provider.server_name().clone())?;
     Ok(client)
 }
 
@@ -137,28 +143,42 @@ impl Pool {
         self.injector.push(conn);
     }
 
-    fn select(&mut self) -> Option<Conn> {
-        loop {
+    fn select(&mut self, endpoint: &str) -> Option<Conn> {
+        let mut retry_times = 0;
+        while retry_times < 3 {
             let Steal::Success(mut conn) = self.injector.steal() else {
-                return None;
+                retry_times += 1;
+                continue;
             };
-            if conn.health_check().is_ok() {
+            if conn.endpoint != endpoint {
+                let is_injector_empty = self.injector.is_empty();
+                self.injector.push(conn);
+                if is_injector_empty {
+                    return None;
+                }
+            } else if conn.health_check().is_ok() {
                 return Some(conn);
             }
+            retry_times += 1;
         }
+        None
     }
 }
 
 pub struct Conn {
+    endpoint: String,
     tls_stream: TlsOutgoingStream<'static>,
 }
 
 impl Conn {
-    pub fn new(stream: TcpStream, client: rustls::ClientConnection) -> Self {
+    pub fn new(endpoint: &str, stream: TcpStream, client: rustls::ClientConnection) -> Self {
         let boxed_stream = Box::new(stream);
         let boxed_client = Box::new(client);
         let tls_stream = TlsOutgoingStream::new(Box::leak(boxed_client), Box::leak(boxed_stream));
-        Self { tls_stream }
+        Self {
+            endpoint: endpoint.to_string(),
+            tls_stream,
+        }
     }
 
     pub fn health_check(&mut self) -> Result<(), Error> {
@@ -186,18 +206,24 @@ impl Conn {
             .sock
             .set_write_timeout(Some(time::Duration::from_millis(200)))?;
         self.tls_stream.write_all(b"GET / HTTP/1.1\r\n")?;
-        self.tls_stream
-            .write_all(crate::args().host_header.as_bytes())?;
-        self.tls_stream
-            .write_all(crate::args().auth_header.as_bytes())?;
+        self.tls_stream.write_all(b"Host: ")?;
+        self.tls_stream.write_all(self.endpoint.as_bytes())?;
+        self.tls_stream.write_all(b"\r\n")?;
         self.tls_stream
             .write_all(b"Connection: keep-alive\r\n\r\n")?;
         self.tls_stream.flush()?;
         let mut response = http::Response::new(&mut self.tls_stream)?;
         response.write_to(&mut io::empty())?;
+        let conn_keep_alive = response.payload.conn_keep_alive;
         drop(response);
         self.tls_stream.sock.set_read_timeout(ori_read_timeout)?;
         self.tls_stream.sock.set_write_timeout(ori_write_timeout)?;
+        if !conn_keep_alive {
+            return Err(Error::IO(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "",
+            )));
+        }
         Ok(())
     }
 }

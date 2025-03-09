@@ -1,6 +1,7 @@
 pub mod conn;
 pub mod executor;
 pub mod http;
+pub mod provider;
 
 use std::fs;
 use std::io;
@@ -15,6 +16,8 @@ use rustls_pki_types::pem::PemObject;
 
 use structured_logger::json::new_writer;
 
+use provider::{new_provider, Provider};
+
 static PROG_ARGS: AtomicPtr<Arc<ProgArgs>> = AtomicPtr::new(ptr::null_mut());
 
 fn args() -> Arc<ProgArgs> {
@@ -25,9 +28,17 @@ fn args() -> Arc<ProgArgs> {
 struct Config<'a> {
     cert_file: &'a str,
     private_key_file: &'a str,
-    host: &'a str,
-    api_key: &'a str,
+    providers: Vec<ProviderConfig<'a>>,
     auth_keys: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderConfig<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    host: &'a str,
+    endpoint: &'a str,
+    api_key: &'a str,
 }
 
 pub fn load_config(
@@ -56,21 +67,8 @@ pub fn update_config(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::E
 
 pub struct ProgArgs {
     tls_server_config: Arc<rustls::ServerConfig>,
-    tls_server_name: rustls_pki_types::ServerName<'static>,
-    addr: String,
-    host_header: &'static str,
-    auth_header: &'static str,
-    auth_keys: Vec<String>,
+    providers: Vec<Box<dyn Provider>>,
     last_modified: SystemTime,
-}
-
-impl Drop for ProgArgs {
-    fn drop(&mut self) {
-        unsafe {
-            drop(Box::from_raw(self.host_header as *const str as *mut str));
-            drop(Box::from_raw(self.auth_header as *const str as *mut str));
-        }
-    }
 }
 
 impl ProgArgs {
@@ -84,40 +82,29 @@ impl ProgArgs {
         let tls_server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, private_key)?;
-        let mut addr = String::from(config.host);
-        addr.push_str(":443");
-        let mut host_header = String::from("Host: ");
-        host_header.push_str(config.host);
-        host_header.push_str("\r\n");
-        let mut auth_header = String::from("Authorization: Bearer ");
-        auth_header.push_str(config.api_key);
-        auth_header.push_str("\r\n");
+        let auth_keys = Arc::new(config.auth_keys);
+        let mut providers = Vec::new();
+        for provider in config.providers {
+            providers.push(new_provider(
+                provider.kind,
+                provider.host,
+                provider.endpoint,
+                provider.api_key,
+                Arc::clone(&auth_keys),
+            )?);
+        }
         Ok(Self {
             tls_server_config: Arc::new(tls_server_config),
-            tls_server_name: config.host.to_string().try_into()?,
-            addr,
-            host_header: Box::leak(host_header.into_boxed_str()),
-            auth_header: Box::leak(auth_header.into_boxed_str()),
-            auth_keys: config.auth_keys,
+            providers,
             last_modified,
         })
     }
 
-    pub fn is_valid_key(&self, header: Option<&[u8]>) -> bool {
-        let Some(header) = header else {
-            return false;
-        };
-        let Ok(header_str) = std::str::from_utf8(header) else {
-            return false;
-        };
-        if !http::is_header(header_str, http::HEADER_AUTHORIZATION) {
-            return false;
-        }
-        let Some(key) = header_str[http::HEADER_AUTHORIZATION.len()..].strip_prefix("Bearer ")
-        else {
-            return false;
-        };
-        self.auth_keys.iter().any(|k| k == key.trim())
+    pub fn select_provider(&self, host: &str) -> Option<&dyn Provider> {
+        self.providers
+            .iter()
+            .map(|provider| &**provider)
+            .find(|provider| provider.host() == host)
     }
 }
 
