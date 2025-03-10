@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Once};
 use std::time::SystemTime;
 
+use rand::seq::IndexedRandom;
+
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pki_types::pem::PemObject;
 
@@ -81,7 +83,7 @@ pub struct ProgArgs {
 
 impl ProgArgs {
     fn from_config(
-        config: Config,
+        mut config: Config,
         last_modified: SystemTime,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let certs =
@@ -92,6 +94,7 @@ impl ProgArgs {
             .with_single_cert(certs, private_key)?;
         let auth_keys = Arc::new(config.auth_keys);
         let mut providers = Vec::new();
+        config.providers.sort_by_key(|provider| provider.host);
         for provider in config.providers {
             providers.push(new_provider(
                 provider.kind,
@@ -109,10 +112,37 @@ impl ProgArgs {
     }
 
     pub fn select_provider(&self, host: &str) -> Option<&dyn Provider> {
-        self.providers
+        let Some(start) = self.providers.iter().enumerate().find_map(|(i, provider)| {
+            if provider.host() == host {
+                Some(i)
+            } else {
+                None
+            }
+        }) else {
+            return None;
+        };
+        let Some(end) = self
+            .providers
             .iter()
+            .rev()
+            .enumerate()
+            .map(|(i, provider)| (self.providers.len() - i - 1, provider))
+            .find_map(|(i, provider)| {
+                if provider.host() == host {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+        else {
+            return None;
+        };
+        if start == end {
+            return Some(&*self.providers[start]);
+        }
+        self.providers[start..=end]
+            .choose(&mut rand::rng())
             .map(|provider| &**provider)
-            .find(|provider| provider.host() == host)
     }
 }
 
