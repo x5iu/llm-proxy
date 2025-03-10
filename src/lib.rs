@@ -24,20 +24,24 @@ fn args() -> Arc<ProgArgs> {
     unsafe { Arc::clone(&*PROG_ARGS.load(std::sync::atomic::Ordering::SeqCst)) }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Config<'a> {
+    #[serde(skip_serializing)]
     cert_file: &'a str,
+    #[serde(skip_serializing)]
     private_key_file: &'a str,
     providers: Vec<ProviderConfig<'a>>,
+    #[serde(skip_serializing)]
     auth_keys: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ProviderConfig<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     host: &'a str,
     endpoint: &'a str,
+    #[serde(skip_serializing)]
     api_key: &'a str,
 }
 
@@ -53,6 +57,7 @@ pub fn load_config(
             .with_target_writer("gpt*", new_writer(io::stderr()))
             .init();
     });
+    log::info!(config:serde = config; "config loaded");
     let args = ProgArgs::from_config(config, metadata.modified()?)?;
     Ok(PROG_ARGS.swap(Box::into_raw(Box::new(Arc::new(args))), Ordering::SeqCst))
 }
