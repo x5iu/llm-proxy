@@ -9,10 +9,15 @@ pub fn new_provider(
     endpoint: &str,
     api_key: &str,
     auth_keys: Arc<Vec<String>>,
+    provider_auth_keys: Option<Vec<String>>,
 ) -> Result<Box<dyn Provider>, Box<dyn std::error::Error>> {
     match kind {
         "openai" => Ok(Box::new(OpenAIProvider::new(
-            host, endpoint, api_key, auth_keys,
+            host,
+            endpoint,
+            api_key,
+            auth_keys,
+            provider_auth_keys,
         )?)),
         _ => Err(format!("Unsupported provider type: {:?}", kind).into()),
     }
@@ -56,6 +61,7 @@ pub struct OpenAIProvider {
     sock_address: String,
     server_name: rustls_pki_types::ServerName<'static>,
     auth_keys: Arc<Vec<String>>,
+    provider_auth_keys: Option<Vec<String>>,
 }
 
 impl OpenAIProvider {
@@ -64,6 +70,7 @@ impl OpenAIProvider {
         endpoint: &str,
         api_key: &str,
         auth_keys: Arc<Vec<String>>,
+        provider_auth_keys: Option<Vec<String>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let static_host = Box::leak(host.to_string().into_boxed_str());
         let static_endpoint = Box::leak(endpoint.to_string().into_boxed_str());
@@ -89,6 +96,7 @@ impl OpenAIProvider {
             sock_address,
             server_name,
             auth_keys,
+            provider_auth_keys,
         })
     }
 }
@@ -157,6 +165,7 @@ impl Provider for OpenAIProvider {
         };
         self.auth_keys
             .iter()
+            .chain(self.provider_auth_keys.iter().flatten())
             .find(|&k| k == key.trim())
             .map(|_| ())
             .ok_or(AuthenticationError)

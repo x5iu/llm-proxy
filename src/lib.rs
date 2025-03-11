@@ -45,6 +45,9 @@ struct ProviderConfig<'a> {
     endpoint: &'a str,
     #[serde(skip_serializing)]
     api_key: &'a str,
+    #[serde(skip_serializing)]
+    #[serde(rename = "auth_keys")]
+    provider_auth_keys: Option<Vec<String>>,
 }
 
 pub fn load_config(
@@ -102,6 +105,7 @@ impl ProgArgs {
                 provider.endpoint,
                 provider.api_key,
                 Arc::clone(&auth_keys),
+                provider.provider_auth_keys,
             )?);
         }
         Ok(Self {
