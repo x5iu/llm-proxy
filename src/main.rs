@@ -45,7 +45,7 @@ fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
     let executor = Arc::new(Executor::new());
     run_background(Arc::clone(&executor));
     watch_config(config);
-    log::info!(tls = true; "gpt proxy started");
+    log::info!(tls = true, debug = cfg!(debug_assertions); "gpt proxy started");
     for signal in &mut signals {
         match signal {
             signal::SIGTERM | signal::SIGINT => break,
@@ -53,7 +53,7 @@ fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
         }
     }
     executor.shutdown();
-    log::info!(tls = true; "gpt proxy exited");
+    log::info!(tls = true, debug = cfg!(debug_assertions); "gpt proxy exited");
     Ok(())
 }
 
