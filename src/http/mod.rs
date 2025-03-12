@@ -1,10 +1,8 @@
 pub mod reader;
 
+use std::borrow::Cow;
+use std::io::{Cursor, Read, Write};
 use std::ops::Range;
-use std::{
-    io::{Cursor, Read, Write},
-    usize,
-};
 
 use crate::Error;
 
@@ -14,10 +12,13 @@ const DEFAULT_BUFFER_SIZE: usize = 4096;
 
 const CRLF: &[u8] = b"\r\n";
 
+pub(crate) const QUERY_KEY_KEY: &str = "key";
+
 const HEADER_CONTENT_LENGTH: &str = "Content-Length: ";
 const HEADER_TRANSFER_ENCODING: &str = "Transfer-Encoding: ";
 const HEADER_HOST: &str = "Host: ";
 pub(crate) const HEADER_AUTHORIZATION: &str = "Authorization: ";
+pub(crate) const HEADER_X_API_KEY: &str = "X-API-Key: ";
 const HEADER_CONNECTION: &str = "Connection: ";
 
 const TRANSFER_ENCODING_CHUNKED: &str = "chunked";
@@ -37,15 +38,21 @@ impl<'a> Request<'a> {
     }
 
     pub fn write_to<W: Write>(&mut self, writer: &mut W) -> Result<(), Error> {
+        #[cfg(debug_assertions)]
+        let mut payload_blocks = Vec::new();
         loop {
             let Some(block) = self.payload.next_block()? else {
                 break;
             };
             if block.len() > 0 {
-                writer.write_all(block)?;
+                #[cfg(debug_assertions)]
+                payload_blocks.push(block.to_vec());
+                writer.write_all(&block)?;
             }
         }
         writer.flush()?;
+        #[cfg(debug_assertions)]
+        log::info!(payload:serde = payload_blocks; "http_request_blocks");
         Ok(())
     }
 
@@ -53,12 +60,8 @@ impl<'a> Request<'a> {
         self.payload.host()
     }
 
-    pub fn host_header(&self) -> Option<&[u8]> {
-        self.payload.host_header()
-    }
-
-    pub fn auth_header(&self) -> Option<&[u8]> {
-        self.payload.auth_header()
+    pub fn auth_key(&self) -> Option<&[u8]> {
+        self.payload.auth_key()
     }
 }
 
@@ -83,12 +86,12 @@ impl<'a> Response<'a> {
             if block.len() > 0 {
                 #[cfg(debug_assertions)]
                 payload_blocks.push(block.to_vec());
-                writer.write_all(block)?;
+                writer.write_all(&block)?;
             }
         }
         writer.flush()?;
         #[cfg(debug_assertions)]
-        log::info!(payload:serde = payload_blocks; "http_payload_blocks");
+        log::info!(payload:serde = payload_blocks; "http_response_blocks");
         Ok(())
     }
 }
@@ -104,6 +107,15 @@ pub(crate) struct Payload<'a> {
     header_chunks: [Option<Range<usize>>; 4],
     header_current_chunk: usize,
     pub(crate) conn_keep_alive: bool,
+}
+
+macro_rules! select {
+    ($host:expr => $provider:ident) => {
+        let prog_args = crate::args();
+        let Some($provider) = prog_args.select_provider($host) else {
+            return Err(Error::InvalidHeader);
+        };
+    };
 }
 
 impl<'a> Payload<'a> {
@@ -183,24 +195,31 @@ impl<'a> Payload<'a> {
                 .as_ref()
                 .map(|range| &block[range.start..range.end]),
         ) {
-            let prog_args = crate::args();
-            let Some(provider) = prog_args.select_provider(host) else {
-                return Err(Error::InvalidHeader);
-            };
-            let header_lines = HeaderLines::new(&crlfs, header);
-            for line in header_lines.skip(1) {
-                let Ok(header) = std::str::from_utf8(line) else {
+            select!(host => provider);
+            if let Some(auth_header_key) = provider.auth_header_key() {
+                let header_lines = HeaderLines::new(&crlfs, header);
+                for line in header_lines.skip(1) {
+                    let Ok(header) = std::str::from_utf8(line) else {
+                        return Err(Error::InvalidHeader);
+                    };
+                    if is_header(header, auth_header_key) {
+                        let start = {
+                            let block_start = &block[0] as *const u8 as usize;
+                            let auth_start = &line[0] as *const u8 as usize;
+                            auth_start - block_start
+                        };
+                        header_chunks[1] = Some(start..start + line.len());
+                        auth_range = Some(start..start + line.len());
+                    }
+                }
+            } else if let Some(auth_query_key) = provider.auth_query_key() {
+                let Some(request_line) = HeaderLines::new(&crlfs, header).next() else {
                     return Err(Error::InvalidHeader);
                 };
-                if is_header(header, provider.auth_header_key()) {
-                    let start = {
-                        let block_start = &block[0] as *const u8 as usize;
-                        let auth_start = &line[0] as *const u8 as usize;
-                        auth_start - block_start
-                    };
-                    header_chunks[1] = Some(start..start + line.len());
-                    auth_range = Some(start..start + line.len());
-                }
+                let Ok(request_line_str) = std::str::from_utf8(request_line) else {
+                    return Err(Error::InvalidHeader);
+                };
+                auth_range = get_auth_query_range(request_line_str, auth_query_key);
             }
         };
         let mut first_block_length = advanced;
@@ -257,7 +276,7 @@ impl<'a> Payload<'a> {
         }
     }
 
-    fn auth_header(&self) -> Option<&[u8]> {
+    fn auth_key(&self) -> Option<&[u8]> {
         if let Some(ref range) = self.auth_range {
             Some(&self.internal_buffer[range.start..range.end])
         } else {
@@ -265,15 +284,28 @@ impl<'a> Payload<'a> {
         }
     }
 
-    fn next_block(&mut self) -> Result<Option<&[u8]>, Error> {
+    fn next_block(&mut self) -> Result<Option<Cow<[u8]>>, Error> {
         match self.state {
             ReadState::Start => {
                 if self.header_current_chunk < self.header_chunks.len() {
                     if let Some(ref range) = self.header_chunks[self.header_current_chunk] {
-                        #[cfg(debug_assertions)]
-                        log::info!(step = "ReadState::Start"; "current_block:header_chunks({})", self.header_current_chunk);
+                        let cur_idx = self.header_current_chunk;
                         self.header_current_chunk += 1;
-                        return Ok(Some(&self.internal_buffer[range.start..range.end]));
+                        #[cfg(debug_assertions)]
+                        log::info!(step = "ReadState::Start"; "current_block:header_chunks({})", cur_idx);
+                        if cur_idx == 0 {
+                            if self.auth_range.is_some() && self.host_range.is_some() {
+                                select!(self.host().unwrap() => provider);
+                                if let Some(rewrited) = provider.rewrite_first_header_block(
+                                    &self.internal_buffer[range.start..range.end],
+                                ) {
+                                    return Ok(Some(Cow::Owned(rewrited)));
+                                }
+                            }
+                        }
+                        return Ok(Some(Cow::Borrowed(
+                            &self.internal_buffer[range.start..range.end],
+                        )));
                     }
                 }
                 self.state = ReadState::HostHeader;
@@ -284,11 +316,8 @@ impl<'a> Payload<'a> {
                 if self.host_range.is_some() {
                     #[cfg(debug_assertions)]
                     log::info!(step = "ReadState::HostHeader"; "current_block:host_header");
-                    let prog_args = crate::args();
-                    let Some(provider) = prog_args.select_provider(self.host().unwrap()) else {
-                        return Err(Error::InvalidHeader);
-                    };
-                    Ok(Some(provider.host_header().as_bytes()))
+                    select!(self.host().unwrap() => provider);
+                    Ok(Some(Cow::Borrowed(provider.host_header().as_bytes())))
                 } else {
                     self.next_block()
                 }
@@ -298,11 +327,12 @@ impl<'a> Payload<'a> {
                 if self.auth_range.is_some() && self.host_range.is_some() {
                     #[cfg(debug_assertions)]
                     log::info!(step = "ReadState::AuthHeader"; "current_block:auth_header");
-                    let prog_args = crate::args();
-                    let Some(provider) = prog_args.select_provider(self.host().unwrap()) else {
-                        return Err(Error::InvalidHeader);
-                    };
-                    Ok(Some(provider.auth_header().as_bytes()))
+                    select!(self.host().unwrap() => provider);
+                    if let Some(auth_header) = provider.auth_header() {
+                        Ok(Some(Cow::Borrowed(auth_header.as_bytes())))
+                    } else {
+                        self.next_block()
+                    }
                 } else {
                     self.next_block()
                 }
@@ -311,13 +341,13 @@ impl<'a> Payload<'a> {
                 self.state = ReadState::FinishHeader;
                 #[cfg(debug_assertions)]
                 log::info!(step = "ReadState::ConnectionHeader"; "current_block:connection_header");
-                Ok(Some(HEADER_CONNECTION_KEEP_ALIVE))
+                Ok(Some(Cow::Borrowed(HEADER_CONNECTION_KEEP_ALIVE)))
             }
             ReadState::FinishHeader => {
                 self.state = ReadState::ReadBody;
                 #[cfg(debug_assertions)]
                 log::info!(step = "ReadState::FinishHeader"; "current_block:finish_header");
-                Ok(Some(CRLF))
+                Ok(Some(Cow::Borrowed(CRLF)))
             }
             ReadState::ReadBody => {
                 self.state = ReadState::UnreadBody;
@@ -325,7 +355,9 @@ impl<'a> Payload<'a> {
                     Body::Read(range) => {
                         #[cfg(debug_assertions)]
                         log::info!(step = "ReadState::ReadBody"; "current_block:total_body_already_been_read");
-                        Ok(Some(&self.internal_buffer[range.start..range.end]))
+                        Ok(Some(Cow::Borrowed(
+                            &self.internal_buffer[range.start..range.end],
+                        )))
                     }
                     Body::Unread(_) => {
                         let (start, end) =
@@ -333,7 +365,7 @@ impl<'a> Payload<'a> {
                         if start < end {
                             #[cfg(debug_assertions)]
                             log::info!(step = "ReadState::ReadBody"; "current_block:body_already_been_read");
-                            Ok(Some(&self.internal_buffer[start..end]))
+                            Ok(Some(Cow::Borrowed(&self.internal_buffer[start..end])))
                         } else {
                             self.next_block()
                         }
@@ -347,7 +379,7 @@ impl<'a> Payload<'a> {
                         Ok(n) => {
                             #[cfg(debug_assertions)]
                             log::info!(step = "ReadState::UnreadBody"; "current_block:body_in_stream");
-                            Ok(Some(&self.internal_buffer[..n]))
+                            Ok(Some(Cow::Borrowed(&self.internal_buffer[..n])))
                         }
                         Err(e) => Err(e.into()),
                     }
@@ -371,6 +403,37 @@ fn get_host(header: Option<&[u8]>) -> Option<&str> {
                 host
             }
         })
+}
+
+#[inline]
+pub(crate) fn get_auth_query_range(header: &str, key: &str) -> Option<Range<usize>> {
+    let first_whitespace_idx = header.find(' ')?;
+    let second_whitespace_idx = {
+        let idx = header[first_whitespace_idx + 1..].find(' ')?;
+        first_whitespace_idx + 1 + idx
+    };
+    let url = &header[first_whitespace_idx + 1..second_whitespace_idx];
+    let question_mark_idx = url.find('?')?;
+    let mut query = &url[question_mark_idx + 1..];
+    if let Some(pound_sign_idx) = query.find('#') {
+        query = &query[..pound_sign_idx]
+    }
+    let parts = query.split('&');
+    for part in parts {
+        if let Some(equal_sign_idx) = part.find('=') {
+            let (qkey, qval) = part.split_at(equal_sign_idx);
+            if qkey == key && qval.len() > 1 {
+                let start = {
+                    let header_start = &header.as_bytes()[0] as *const u8 as usize;
+                    let part_start = &qval.as_bytes()[1] as *const u8 as usize;
+                    part_start - header_start
+                };
+                let end = start + (qval.len() - 1);
+                return Some(start..end);
+            }
+        }
+    }
+    None
 }
 
 #[inline]

@@ -90,9 +90,9 @@ impl Pool {
                 is_bad_request = true;
                 break;
             };
-            if !provider.authenticate(request.auth_header()).is_ok() {
+            if !provider.authenticate(request.auth_key()).is_ok() {
                 #[cfg(debug_assertions)]
-                log::error!(provider = provider.kind().to_string(), header:serde = request.auth_header().map(|header| header.to_vec()); "authentication_failed");
+                log::error!(provider = provider.kind().to_string(), header:serde = request.auth_key().map(|header| header.to_vec()); "authentication_failed");
                 is_invalid_key = true;
                 break;
             }
@@ -134,7 +134,7 @@ impl Pool {
 
 fn new_tls_client(provider: &dyn Provider) -> Result<rustls::ClientConnection, Error> {
     let client =
-        rustls::ClientConnection::new(TLS_CLIENT_CONFIG.clone(), provider.server_name().clone())?;
+        rustls::ClientConnection::new(Arc::clone(&*TLS_CLIENT_CONFIG), provider.server_name())?;
     Ok(client)
 }
 
