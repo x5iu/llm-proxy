@@ -92,9 +92,11 @@ impl ProgArgs {
         let certs =
             CertificateDer::pem_file_iter(config.cert_file)?.collect::<Result<Vec<_>, _>>()?;
         let private_key = PrivateKeyDer::from_pem_file(config.private_key_file)?;
-        let tls_server_config = rustls::ServerConfig::builder()
+        let mut tls_server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, private_key)?;
+        // Currently gpt only supports HTTP/1.1 protocol
+        tls_server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let auth_keys = Arc::new(config.auth_keys);
         let mut providers = Vec::new();
         config.providers.sort_by_key(|provider| provider.host);
