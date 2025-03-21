@@ -62,7 +62,7 @@ pub fn load_config(
             .with_target_writer("gpt*", new_writer(io::stderr()))
             .init();
     });
-    log::info!(config:serde = config; "config loaded");
+    log::info!(config:serde = config; "load_config");
     let args = ProgArgs::from_config(config, metadata.modified()?)?;
     Ok(PROG_ARGS.swap(Box::into_raw(Box::new(Arc::new(args))), Ordering::SeqCst))
 }

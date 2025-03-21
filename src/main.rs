@@ -45,7 +45,7 @@ fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
     let executor = Arc::new(Executor::new());
     run_background(Arc::clone(&executor));
     watch_config(config);
-    log::info!(tls = true, debug = cfg!(debug_assertions); "gpt proxy started");
+    log::info!(tls = true, debug = cfg!(debug_assertions); "start_gpt_proxy");
     for signal in &mut signals {
         match signal {
             signal::SIGTERM | signal::SIGINT => break,
@@ -53,7 +53,7 @@ fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
         }
     }
     executor.shutdown();
-    log::info!(tls = true, debug = cfg!(debug_assertions); "gpt proxy exited");
+    log::info!(tls = true, debug = cfg!(debug_assertions); "exit_gpt_proxy");
     Ok(())
 }
 
@@ -70,6 +70,8 @@ fn run_background(executor: Arc<Executor>) {
 fn watch_config(path: PathBuf) {
     thread::spawn(move || loop {
         thread::sleep(time::Duration::from_secs(5));
-        let _ = gpt::update_config(&path);
+        if let Err(e) = gpt::update_config(&path) {
+            log::error!(error = e.to_string(); "update_config_error");
+        }
     });
 }
