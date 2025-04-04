@@ -43,6 +43,8 @@ struct ProviderConfig<'a> {
     kind: &'a str,
     host: &'a str,
     endpoint: &'a str,
+    port: Option<u16>,
+    tls: Option<bool>,
     #[serde(skip_serializing)]
     api_key: &'a str,
     #[serde(skip_serializing)]
@@ -105,6 +107,8 @@ impl ProgArgs {
                 provider.kind,
                 provider.host,
                 provider.endpoint,
+                provider.port,
+                provider.tls.unwrap_or(true),
                 provider.api_key,
                 Arc::clone(&auth_keys),
                 provider.provider_auth_keys,

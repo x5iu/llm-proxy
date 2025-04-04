@@ -7,6 +7,8 @@ pub fn new_provider(
     kind: &str,
     host: &str,
     endpoint: &str,
+    port: Option<u16>,
+    tls: bool,
     api_key: &str,
     auth_keys: Arc<Vec<String>>,
     provider_auth_keys: Option<Vec<String>>,
@@ -15,6 +17,8 @@ pub fn new_provider(
         "openai" => Ok(Box::new(OpenAIProvider::new(
             host,
             endpoint,
+            port,
+            tls,
             api_key,
             auth_keys,
             provider_auth_keys,
@@ -22,6 +26,8 @@ pub fn new_provider(
         "gemini" => Ok(Box::new(GeminiProvider::new(
             host,
             endpoint,
+            port,
+            tls,
             api_key,
             auth_keys,
             provider_auth_keys,
@@ -29,6 +35,8 @@ pub fn new_provider(
         "anthropic" => Ok(Box::new(AnthropicProvider::new(
             host,
             endpoint,
+            port,
+            tls,
             api_key,
             auth_keys,
             provider_auth_keys,
@@ -65,6 +73,10 @@ pub trait Provider {
     fn auth_header_key(&self) -> Option<&'static str>;
     fn authenticate(&self, auth: Option<&[u8]>) -> Result<(), AuthenticationError>;
     fn rewrite_first_header_block(&self, block: &[u8]) -> Option<Vec<u8>>;
+
+    fn tls(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +86,7 @@ pub struct AuthenticationError;
 pub struct OpenAIProvider {
     host: &'static str,
     endpoint: &'static str,
+    tls: bool,
     host_header: &'static str,
     auth_header: &'static str,
     sock_address: String,
@@ -86,6 +99,8 @@ impl OpenAIProvider {
     pub fn new(
         host: &str,
         endpoint: &str,
+        port: Option<u16>,
+        tls: bool,
         api_key: &str,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
@@ -105,10 +120,12 @@ impl OpenAIProvider {
             Box::leak(header.into_boxed_str())
         };
         let server_name = (&*static_endpoint).try_into()?;
-        let sock_address = format!("{}:443", static_endpoint);
+        let port = port.unwrap_or_else(|| if tls { 443 } else { 80 });
+        let sock_address = format!("{}:{}", static_endpoint, port);
         Ok(Self {
             host: static_host,
             endpoint: static_endpoint,
+            tls,
             host_header,
             auth_header,
             sock_address,
@@ -196,11 +213,16 @@ impl Provider for OpenAIProvider {
     fn rewrite_first_header_block(&self, _: &[u8]) -> Option<Vec<u8>> {
         None
     }
+
+    fn tls(&self) -> bool {
+        self.tls
+    }
 }
 
 pub struct GeminiProvider {
     host: &'static str,
     endpoint: &'static str,
+    tls: bool,
     api_key: String,
     host_header: &'static str,
     sock_address: String,
@@ -213,6 +235,8 @@ impl GeminiProvider {
     pub fn new(
         host: &str,
         endpoint: &str,
+        port: Option<u16>,
+        tls: bool,
         api_key: &str,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
@@ -226,10 +250,12 @@ impl GeminiProvider {
             Box::leak(header.into_boxed_str())
         };
         let server_name = (&*static_endpoint).try_into()?;
-        let sock_address = format!("{}:443", static_endpoint);
+        let port = port.unwrap_or_else(|| if tls { 443 } else { 80 });
+        let sock_address = format!("{}:{}", static_endpoint, port);
         Ok(GeminiProvider {
             host: static_host,
             endpoint: static_endpoint,
+            tls,
             api_key: api_key.to_string(),
             host_header,
             sock_address,
@@ -319,11 +345,16 @@ impl Provider for GeminiProvider {
         rewrited.extend_from_slice(&block[query_range.end..]);
         Some(rewrited)
     }
+
+    fn tls(&self) -> bool {
+        self.tls
+    }
 }
 
 pub struct AnthropicProvider {
     host: &'static str,
     endpoint: &'static str,
+    tls: bool,
     host_header: &'static str,
     auth_header: &'static str,
     sock_address: String,
@@ -336,6 +367,8 @@ impl AnthropicProvider {
     pub fn new(
         host: &str,
         endpoint: &str,
+        port: Option<u16>,
+        tls: bool,
         api_key: &str,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
@@ -355,10 +388,12 @@ impl AnthropicProvider {
             Box::leak(header.into_boxed_str())
         };
         let server_name = (&*static_endpoint).try_into()?;
-        let sock_address = format!("{}:443", static_endpoint);
+        let port = port.unwrap_or_else(|| if tls { 443 } else { 80 });
+        let sock_address = format!("{}:{}", static_endpoint, port);
         Ok(Self {
             host: static_host,
             endpoint: static_endpoint,
+            tls,
             host_header,
             auth_header,
             sock_address,
@@ -442,5 +477,9 @@ impl Provider for AnthropicProvider {
 
     fn rewrite_first_header_block(&self, _: &[u8]) -> Option<Vec<u8>> {
         None
+    }
+
+    fn tls(&self) -> bool {
+        self.tls
     }
 }

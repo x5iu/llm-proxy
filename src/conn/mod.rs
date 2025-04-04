@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, LazyLock};
 use std::time;
 
@@ -49,8 +50,12 @@ impl Pool {
                 let stream = TcpStream::connect(provider.sock_address())?;
                 stream.set_read_timeout(Some(time::Duration::from_secs(30)))?;
                 stream.set_write_timeout(Some(time::Duration::from_secs(30)))?;
-                let client = new_tls_client(provider)?;
-                let conn = Conn::new(provider.endpoint(), stream, client);
+                let conn = if provider.tls() {
+                    let client = new_tls_client(provider)?;
+                    Conn::new_tls(provider.endpoint(), stream, client)
+                } else {
+                    Conn::new(provider.endpoint(), stream)
+                };
                 Ok(conn)
             }
         }
@@ -167,23 +172,30 @@ impl Pool {
 
 pub struct Conn {
     endpoint: String,
-    tls_stream: TlsOutgoingStream<'static>,
+    stream: Stream,
 }
 
 impl Conn {
-    pub fn new(endpoint: &str, stream: TcpStream, client: rustls::ClientConnection) -> Self {
+    pub fn new(endpoint: &str, stream: TcpStream) -> Self {
+        Self {
+            endpoint: endpoint.to_string(),
+            stream: Stream::Tcp(stream),
+        }
+    }
+
+    pub fn new_tls(endpoint: &str, stream: TcpStream, client: rustls::ClientConnection) -> Self {
         let boxed_stream = Box::new(stream);
         let boxed_client = Box::new(client);
         let tls_stream = TlsOutgoingStream::new(Box::leak(boxed_client), Box::leak(boxed_stream));
         Self {
             endpoint: endpoint.to_string(),
-            tls_stream,
+            stream: Stream::Tls(tls_stream),
         }
     }
 
     pub fn health_check(&mut self) -> Result<(), Error> {
-        self.tls_stream.sock.set_nonblocking(true)?;
-        match self.tls_stream.read(&mut [0; 1]) {
+        self.stream.set_nonblocking(true)?;
+        match self.stream.read(&mut [0; 1]) {
             Ok(0) => return Err(Error::IO(io::Error::new(io::ErrorKind::NotConnected, ""))),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => (),
             Err(e) => return Err(e.into()),
@@ -194,30 +206,25 @@ impl Conn {
                 )))
             }
         }
-        self.tls_stream.sock.set_nonblocking(false)?;
-        let (ori_read_timeout, ori_write_timeout) = (
-            self.tls_stream.sock.read_timeout()?,
-            self.tls_stream.sock.write_timeout()?,
-        );
-        self.tls_stream
-            .sock
+        self.stream.set_nonblocking(false)?;
+        let (ori_read_timeout, ori_write_timeout) =
+            (self.stream.read_timeout()?, self.stream.write_timeout()?);
+        self.stream
             .set_read_timeout(Some(time::Duration::from_millis(200)))?;
-        self.tls_stream
-            .sock
+        self.stream
             .set_write_timeout(Some(time::Duration::from_millis(200)))?;
-        self.tls_stream.write_all(b"GET / HTTP/1.1\r\n")?;
-        self.tls_stream.write_all(b"Host: ")?;
-        self.tls_stream.write_all(self.endpoint.as_bytes())?;
-        self.tls_stream.write_all(b"\r\n")?;
-        self.tls_stream
-            .write_all(b"Connection: keep-alive\r\n\r\n")?;
-        self.tls_stream.flush()?;
-        let mut response = http::Response::new(&mut self.tls_stream)?;
+        self.stream.write_all(b"GET / HTTP/1.1\r\n")?;
+        self.stream.write_all(b"Host: ")?;
+        self.stream.write_all(self.endpoint.as_bytes())?;
+        self.stream.write_all(b"\r\n")?;
+        self.stream.write_all(b"Connection: keep-alive\r\n\r\n")?;
+        self.stream.flush()?;
+        let mut response = http::Response::new(&mut self.stream)?;
         response.write_to(&mut io::empty())?;
         let conn_keep_alive = response.payload.conn_keep_alive;
         drop(response);
-        self.tls_stream.sock.set_read_timeout(ori_read_timeout)?;
-        self.tls_stream.sock.set_write_timeout(ori_write_timeout)?;
+        self.stream.set_read_timeout(ori_read_timeout)?;
+        self.stream.set_write_timeout(ori_write_timeout)?;
         if !conn_keep_alive {
             return Err(Error::IO(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
@@ -230,25 +237,76 @@ impl Conn {
 
 impl Read for Conn {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.tls_stream.read(buf)
+        self.stream.read(buf)
     }
 }
 
 impl Write for Conn {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.tls_stream.write(buf)
+        self.stream.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.tls_stream.flush()
+        self.stream.flush()
     }
 }
 
 impl Drop for Conn {
     fn drop(&mut self) {
-        unsafe {
-            drop(Box::from_raw(self.tls_stream.conn));
-            drop(Box::from_raw(self.tls_stream.sock));
+        if let Stream::Tls(stream) = &mut self.stream {
+            unsafe {
+                drop(Box::from_raw(stream.conn));
+                drop(Box::from_raw(stream.sock));
+            }
+        }
+    }
+}
+
+enum Stream {
+    Tcp(TcpStream),
+    Tls(TlsOutgoingStream<'static>),
+}
+
+impl Deref for Stream {
+    type Target = TcpStream;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Stream::Tcp(stream) => stream,
+            Stream::Tls(stream) => stream.sock,
+        }
+    }
+}
+
+impl DerefMut for Stream {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Stream::Tcp(stream) => stream,
+            Stream::Tls(stream) => &mut stream.sock,
+        }
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Stream::Tcp(stream) => stream.read(buf),
+            Stream::Tls(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Stream::Tcp(stream) => stream.write(buf),
+            Stream::Tls(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Stream::Tcp(stream) => stream.flush(),
+            Stream::Tls(stream) => stream.flush(),
         }
     }
 }
