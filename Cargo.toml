@@ -1,7 +1,7 @@
 [package]
 name = "gpt"
 authors = ["Hei <xuboyu72@gmail.com>"]
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 description = "A GPT Proxy"
 
@@ -9,10 +9,10 @@ description = "A GPT Proxy"
 name = "gpt"
 
 [dependencies]
-webpki-roots = "*"
-thiserror = "2.0"
-rustls = "*"
-rustls-pki-types = "*"
+webpki-roots = "0.26.8"
+thiserror = "2.0.12"
+rustls = "0.23.25"
+rustls-pki-types = "1.11.0"
 crossbeam = "0.8.4"
 signal-hook = "0.3.17"
 serde = { version = "1.0.218", features = ["derive"] }
