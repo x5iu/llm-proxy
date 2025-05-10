@@ -9,7 +9,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Once};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use rand::seq::IndexedRandom;
 
@@ -35,6 +35,7 @@ struct Config<'a> {
     providers: Vec<ProviderConfig<'a>>,
     #[serde(skip_serializing)]
     auth_keys: Vec<String>,
+    tcp_read_timeout: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -83,6 +84,7 @@ pub fn update_config(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::E
 pub struct ProgArgs {
     tls_server_config: Arc<rustls::ServerConfig>,
     providers: Vec<Box<dyn Provider>>,
+    tcp_read_timeout: Duration,
     last_modified: SystemTime,
 }
 
@@ -117,6 +119,7 @@ impl ProgArgs {
         Ok(Self {
             tls_server_config: Arc::new(tls_server_config),
             providers,
+            tcp_read_timeout: Duration::from_secs(config.tcp_read_timeout.unwrap_or(60)),
             last_modified,
         })
     }

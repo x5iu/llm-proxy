@@ -63,7 +63,7 @@ impl Pool {
         let mut is_bad_request = false;
         incoming
             .sock
-            .set_read_timeout(Some(time::Duration::from_secs(30)))
+            .set_read_timeout(Some(crate::args().tcp_read_timeout))
             .map_err(|e| ProxyError::Client(e.into()))?;
         incoming
             .sock
