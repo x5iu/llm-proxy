@@ -339,11 +339,11 @@ impl Provider for GeminiProvider {
         let Some(query_range) = http::get_auth_query_range(block_str, http::QUERY_KEY_KEY) else {
             return None;
         };
-        let mut rewrited = Vec::with_capacity(block.len());
-        rewrited.extend_from_slice(&block[..query_range.start]);
-        rewrited.extend_from_slice(self.api_key.as_bytes());
-        rewrited.extend_from_slice(&block[query_range.end..]);
-        Some(rewrited)
+        let mut rewritten = Vec::with_capacity(block.len());
+        rewritten.extend_from_slice(&block[..query_range.start]);
+        rewritten.extend_from_slice(self.api_key.as_bytes());
+        rewritten.extend_from_slice(&block[query_range.end..]);
+        Some(rewritten)
     }
 
     fn tls(&self) -> bool {

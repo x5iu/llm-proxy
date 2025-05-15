@@ -296,10 +296,10 @@ impl<'a> Payload<'a> {
                         if cur_idx == 0 {
                             if self.auth_range.is_some() && self.host_range.is_some() {
                                 select!(self.host().unwrap() => provider);
-                                if let Some(rewrited) = provider.rewrite_first_header_block(
+                                if let Some(rewritten) = provider.rewrite_first_header_block(
                                     &self.internal_buffer[range.start..range.end],
                                 ) {
-                                    return Ok(Some(Cow::Owned(rewrited)));
+                                    return Ok(Some(Cow::Owned(rewritten)));
                                 }
                             }
                         }
