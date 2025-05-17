@@ -294,7 +294,7 @@ impl<'a> Payload<'a> {
                         #[cfg(debug_assertions)]
                         log::info!(step = "ReadState::Start"; "current_block:header_chunks({})", cur_idx);
                         if cur_idx == 0 {
-                            if self.auth_range.is_some() && self.host_range.is_some() {
+                            if self.host_range.is_some() {
                                 select!(self.host().unwrap() => provider);
                                 if let Some(rewritten) = provider.rewrite_first_header_block(
                                     &self.internal_buffer[range.start..range.end],
@@ -324,7 +324,7 @@ impl<'a> Payload<'a> {
             }
             ReadState::AuthHeader => {
                 self.state = ReadState::ConnectionHeader;
-                if self.auth_range.is_some() && self.host_range.is_some() {
+                if self.host_range.is_some() {
                     #[cfg(debug_assertions)]
                     log::info!(step = "ReadState::AuthHeader"; "current_block:auth_header");
                     select!(self.host().unwrap() => provider);

@@ -34,7 +34,7 @@ struct Config<'a> {
     private_key_file: &'a str,
     providers: Vec<ProviderConfig<'a>>,
     #[serde(skip_serializing)]
-    auth_keys: Vec<String>,
+    auth_keys: Option<Vec<String>>,
     tcp_read_timeout: Option<u64>,
 }
 
@@ -101,7 +101,7 @@ impl ProgArgs {
             .with_single_cert(certs, private_key)?;
         // Currently gpt only supports HTTP/1.1 protocol
         tls_server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let auth_keys = Arc::new(config.auth_keys);
+        let auth_keys = Arc::new(config.auth_keys.unwrap_or_else(Vec::new));
         let mut providers = Vec::new();
         config.providers.sort_by_key(|provider| provider.host);
         for provider in config.providers {

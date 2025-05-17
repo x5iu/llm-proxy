@@ -185,6 +185,9 @@ impl Provider for OpenAIProvider {
     }
 
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
+        if self.auth_keys.is_empty() && self.provider_auth_keys.is_none() {
+            return Ok(());
+        }
         let Some(header) = header else {
             return Err(AuthenticationError);
         };
@@ -314,6 +317,9 @@ impl Provider for GeminiProvider {
     }
 
     fn authenticate(&self, key: Option<&[u8]>) -> Result<(), AuthenticationError> {
+        if self.auth_keys.is_empty() && self.provider_auth_keys.is_none() {
+            return Ok(());
+        }
         let Some(key) = key else {
             return Err(AuthenticationError);
         };
@@ -453,6 +459,9 @@ impl Provider for AnthropicProvider {
     }
 
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
+        if self.auth_keys.is_empty() && self.provider_auth_keys.is_none() {
+            return Ok(());
+        }
         let Some(header) = header else {
             return Err(AuthenticationError);
         };
