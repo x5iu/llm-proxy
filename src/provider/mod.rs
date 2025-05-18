@@ -9,7 +9,7 @@ pub fn new_provider(
     endpoint: &str,
     port: Option<u16>,
     tls: bool,
-    api_key: &str,
+    api_key: Option<&str>,
     auth_keys: Arc<Vec<String>>,
     provider_auth_keys: Option<Vec<String>>,
 ) -> Result<Box<dyn Provider>, Box<dyn std::error::Error>> {
@@ -88,7 +88,7 @@ pub struct OpenAIProvider {
     endpoint: &'static str,
     tls: bool,
     host_header: &'static str,
-    auth_header: &'static str,
+    auth_header: Option<&'static str>,
     sock_address: String,
     server_name: rustls_pki_types::ServerName<'static>,
     auth_keys: Arc<Vec<String>>,
@@ -101,7 +101,7 @@ impl OpenAIProvider {
         endpoint: &str,
         port: Option<u16>,
         tls: bool,
-        api_key: &str,
+        api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -113,12 +113,12 @@ impl OpenAIProvider {
             header.push_str("\r\n");
             Box::leak(header.into_boxed_str())
         };
-        let auth_header = {
+        let auth_header = api_key.map(|api_key| {
             let mut header = String::from("Authorization: Bearer ");
             header.push_str(api_key);
             header.push_str("\r\n");
-            Box::leak(header.into_boxed_str())
-        };
+            &*Box::leak(header.into_boxed_str())
+        });
         let server_name = (&*static_endpoint).try_into()?;
         let port = port.unwrap_or_else(|| if tls { 443 } else { 80 });
         let sock_address = format!("{}:{}", static_endpoint, port);
@@ -142,7 +142,9 @@ impl Drop for OpenAIProvider {
             drop(Box::from_raw(self.host as *const str as *mut str));
             drop(Box::from_raw(self.endpoint as *const str as *mut str));
             drop(Box::from_raw(self.host_header as *const str as *mut str));
-            drop(Box::from_raw(self.auth_header as *const str as *mut str));
+            if let Some(auth_header) = self.auth_header {
+                drop(Box::from_raw(auth_header as *const str as *mut str));
+            }
         }
     }
 }
@@ -177,11 +179,11 @@ impl Provider for OpenAIProvider {
     }
 
     fn auth_header(&self) -> Option<&'static str> {
-        Some(self.auth_header)
+        self.auth_header
     }
 
     fn auth_header_key(&self) -> Option<&'static str> {
-        Some(http::HEADER_AUTHORIZATION)
+        self.auth_header.map(|_| http::HEADER_AUTHORIZATION)
     }
 
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
@@ -240,10 +242,13 @@ impl GeminiProvider {
         endpoint: &str,
         port: Option<u16>,
         tls: bool,
-        api_key: &str,
+        api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let Some(api_key) = api_key else {
+            return Err("gemini: missing `api_key`".into());
+        };
         let static_host = Box::leak(host.to_string().into_boxed_str());
         let static_endpoint = Box::leak(endpoint.to_string().into_boxed_str());
         let host_header = {
@@ -375,10 +380,13 @@ impl AnthropicProvider {
         endpoint: &str,
         port: Option<u16>,
         tls: bool,
-        api_key: &str,
+        api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let Some(api_key) = api_key else {
+            return Err("anthropic: missing `api_key`".into());
+        };
         let static_host = Box::leak(host.to_string().into_boxed_str());
         let static_endpoint = Box::leak(endpoint.to_string().into_boxed_str());
         let host_header = {

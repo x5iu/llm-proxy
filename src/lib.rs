@@ -47,7 +47,7 @@ struct ProviderConfig<'a> {
     port: Option<u16>,
     tls: Option<bool>,
     #[serde(skip_serializing)]
-    api_key: &'a str,
+    api_key: Option<&'a str>,
     #[serde(skip_serializing)]
     #[serde(rename = "auth_keys")]
     provider_auth_keys: Option<Vec<String>>,
