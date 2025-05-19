@@ -62,7 +62,7 @@ pub fn load_config(
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         structured_logger::Builder::with_level("INFO")
-            .with_target_writer("gpt*", new_writer(io::stderr()))
+            .with_target_writer("llm-proxy*", new_writer(io::stderr()))
             .init();
     });
     log::info!(config:serde = config; "load_config");
@@ -99,7 +99,7 @@ impl ProgArgs {
         let mut tls_server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, private_key)?;
-        // Currently gpt only supports HTTP/1.1 protocol
+        // Currently llm-proxy only supports HTTP/1.1 protocol
         tls_server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let auth_keys = Arc::new(config.auth_keys.unwrap_or_else(Vec::new));
         let mut providers = Vec::new();

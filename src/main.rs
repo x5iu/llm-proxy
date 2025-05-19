@@ -11,11 +11,11 @@ use signal_hook::consts::signal;
 use signal_hook::iterator::exfiltrator::SignalOnly;
 use signal_hook::iterator::SignalsInfo;
 
-use gpt::executor::Executor;
+use llm_proxy::executor::Executor;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
-struct GPT {
+struct LLMProxy {
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -31,8 +31,8 @@ enum Command {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let gpt = GPT::parse();
-    match gpt.command {
+    let llm_proxy = LLMProxy::parse();
+    match llm_proxy.command {
         Some(Command::Start { config }) => start(config)?,
         _ => (),
     }
@@ -40,12 +40,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
-    gpt::load_config(&config)?;
+    llm_proxy::load_config(&config)?;
     let mut signals = SignalsInfo::<SignalOnly>::new([signal::SIGTERM, signal::SIGINT])?;
     let executor = Arc::new(Executor::new());
     run_background(Arc::clone(&executor));
     watch_config(config);
-    log::info!(tls = true, debug = cfg!(debug_assertions); "start_gpt_proxy");
+    log::info!(tls = true, debug = cfg!(debug_assertions); "start_llm_proxy");
     for signal in &mut signals {
         match signal {
             signal::SIGTERM | signal::SIGINT => break,
@@ -53,7 +53,7 @@ fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
         }
     }
     executor.shutdown();
-    log::info!(tls = true, debug = cfg!(debug_assertions); "exit_gpt_proxy");
+    log::info!(tls = true, debug = cfg!(debug_assertions); "exit_llm_proxy");
     Ok(())
 }
 
@@ -70,7 +70,7 @@ fn run_background(executor: Arc<Executor>) {
 fn watch_config(path: PathBuf) {
     thread::spawn(move || loop {
         thread::sleep(time::Duration::from_secs(5));
-        if let Err(e) = gpt::update_config(&path) {
+        if let Err(e) = llm_proxy::update_config(&path) {
             log::error!(error = e.to_string(); "update_config_error");
         }
     });
