@@ -183,7 +183,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn auth_header_key(&self) -> Option<&'static str> {
-        self.auth_header.map(|_| http::HEADER_AUTHORIZATION)
+        Some(http::HEADER_AUTHORIZATION)
     }
 
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
