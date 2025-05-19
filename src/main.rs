@@ -27,28 +27,38 @@ enum Command {
         /// Path to the config file
         #[arg(short, long, value_name = "FILE")]
         config: PathBuf,
+
+        /// Auto watch and reload config file
+        #[arg(long = "auto-reload-config")]
+        auto_reload_config: Option<bool>,
     },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let llm_proxy = LLMProxy::parse();
     match llm_proxy.command {
-        Some(Command::Start { config }) => start(config)?,
+        Some(Command::Start {
+            config,
+            auto_reload_config,
+        }) => start(config, auto_reload_config.unwrap_or_default())?,
         _ => (),
     }
     Ok(())
 }
 
-fn start(config: PathBuf) -> Result<(), Box<dyn Error>> {
+fn start(config: PathBuf, auto_reload_config: bool) -> Result<(), Box<dyn Error>> {
     llm_proxy::load_config(&config)?;
     let mut signals = SignalsInfo::<SignalOnly>::new([signal::SIGTERM, signal::SIGINT])?;
     let executor = Arc::new(Executor::new());
     run_background(Arc::clone(&executor));
-    watch_config(config);
+    if auto_reload_config {
+        watch_config(config.clone());
+    }
     log::info!(tls = true, debug = cfg!(debug_assertions); "start_llm_proxy");
     for signal in &mut signals {
         match signal {
             signal::SIGTERM | signal::SIGINT => break,
+            signal::SIGHUP => llm_proxy::force_update_config(&config)?,
             _ => (),
         }
     }

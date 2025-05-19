@@ -81,6 +81,14 @@ pub fn update_config(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+pub fn force_update_config(path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
+    unsafe {
+        let ori_ptr = load_config(path)?;
+        drop(Box::from_raw(ori_ptr));
+        Ok(())
+    }
+}
+
 pub struct ProgArgs {
     tls_server_config: Arc<rustls::ServerConfig>,
     providers: Vec<Box<dyn Provider>>,
