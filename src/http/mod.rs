@@ -196,12 +196,13 @@ impl<'a> Payload<'a> {
                 .map(|range| &block[range.start..range.end]),
         ) {
             select!(host => provider);
-            // Only when the provider has supplied a `api_key` will the authentication-related
-            // content in the request headers be captured for later interception and replacement. If
-            // the provider has not supplied a `api_key`, authentication-related content in the
-            // request headers will not be intercepted or replaced, and the original authentication
-            // information from the request will be used.
-            if provider.auth_header().is_some() {
+            // Only when the provider has supplied a `api_key` or an `auth_keys` will the
+            // authentication-related content in the request headers be captured for later
+            // interception and replacement. If the provider has not supplied a `api_key`, nor an
+            // `auth_keys`, authentication-related content in the request headers will not be
+            // intercepted or replaced, and the original authentication information from the request
+            // will be used.
+            if provider.auth_header().is_some() || provider.has_auth_keys() {
                 if let Some(auth_header_key) = provider.auth_header_key() {
                     let header_lines = HeaderLines::new(&crlfs, header);
                     for line in header_lines.skip(1) {

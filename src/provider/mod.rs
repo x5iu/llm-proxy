@@ -71,6 +71,7 @@ pub trait Provider {
     fn auth_query_key(&self) -> Option<&'static str>;
     fn auth_header(&self) -> Option<&'static str>;
     fn auth_header_key(&self) -> Option<&'static str>;
+    fn has_auth_keys(&self) -> bool;
     fn authenticate(&self, auth: Option<&[u8]>) -> Result<(), AuthenticationError>;
     fn rewrite_first_header_block(&self, block: &[u8]) -> Option<Vec<u8>>;
 
@@ -186,8 +187,12 @@ impl Provider for OpenAIProvider {
         Some(http::HEADER_AUTHORIZATION)
     }
 
+    fn has_auth_keys(&self) -> bool {
+        self.auth_keys.len() > 0 || self.provider_auth_keys.is_some()
+    }
+
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
-        if self.auth_keys.is_empty() && self.provider_auth_keys.is_none() {
+        if !self.has_auth_keys() {
             return Ok(());
         }
         let Some(header) = header else {
@@ -321,8 +326,12 @@ impl Provider for GeminiProvider {
         None
     }
 
+    fn has_auth_keys(&self) -> bool {
+        self.auth_keys.len() > 0 || self.provider_auth_keys.is_some()
+    }
+
     fn authenticate(&self, key: Option<&[u8]>) -> Result<(), AuthenticationError> {
-        if self.auth_keys.is_empty() && self.provider_auth_keys.is_none() {
+        if !self.has_auth_keys() {
             return Ok(());
         }
         let Some(key) = key else {
@@ -466,8 +475,12 @@ impl Provider for AnthropicProvider {
         Some(http::HEADER_X_API_KEY)
     }
 
+    fn has_auth_keys(&self) -> bool {
+        self.auth_keys.len() > 0 || self.provider_auth_keys.is_some()
+    }
+
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
-        if self.auth_keys.is_empty() && self.provider_auth_keys.is_none() {
+        if !self.has_auth_keys() {
             return Ok(());
         }
         let Some(header) = header else {
