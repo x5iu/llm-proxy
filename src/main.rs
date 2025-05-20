@@ -38,9 +38,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let llm_proxy = LLMProxy::parse();
     match llm_proxy.command {
         Some(Command::Start {
-            config,
-            auto_reload_config,
-        }) => start(config, auto_reload_config.unwrap_or_default())?,
+                 config,
+                 auto_reload_config,
+             }) => start(config, auto_reload_config.unwrap_or_default())?,
         _ => (),
     }
     Ok(())
@@ -48,7 +48,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn start(config: PathBuf, auto_reload_config: bool) -> Result<(), Box<dyn Error>> {
     llm_proxy::load_config(&config)?;
-    let mut signals = SignalsInfo::<SignalOnly>::new([signal::SIGTERM, signal::SIGINT])?;
+    let mut signals =
+        SignalsInfo::<SignalOnly>::new([signal::SIGTERM, signal::SIGINT, signal::SIGHUP])?;
     let executor = Arc::new(Executor::new());
     run_background(Arc::clone(&executor));
     if auto_reload_config {
