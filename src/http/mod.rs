@@ -446,6 +446,8 @@ pub(crate) fn get_auth_query_range(header: &str, key: &str) -> Option<Range<usiz
 
 #[inline]
 pub(crate) fn is_header(header: &str, key: &str) -> bool {
+    // str could cause `not a char boundary` issue, so we use bytes
+    let (header, key) = (header.as_bytes(), key.as_bytes());
     header.len() >= key.len() && header[..key.len()].eq_ignore_ascii_case(key)
 }
 
