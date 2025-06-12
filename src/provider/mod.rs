@@ -61,7 +61,7 @@ impl fmt::Display for Type {
     }
 }
 
-pub trait Provider {
+pub trait Provider: Send + Sync {
     fn kind(&self) -> Type;
     fn host(&self) -> &str;
     fn endpoint(&self) -> &str;

@@ -1,8 +1,9 @@
-use std::io::{self, Read, Write};
-use std::net::TcpStream;
-use std::ops::{Deref, DerefMut};
+use std::pin::{pin, Pin};
 use std::sync::{Arc, LazyLock};
-use std::time;
+use std::task::{Context, Poll};
+
+use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpStream;
 
 use crossbeam::deque::{Injector, Steal};
 
@@ -19,8 +20,8 @@ static TLS_CLIENT_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(||
     Arc::new(config)
 });
 
-type TlsIncomingStream<'a> = rustls::Stream<'a, rustls::ServerConnection, TcpStream>;
-type TlsOutgoingStream<'a> = rustls::Stream<'a, rustls::ClientConnection, TcpStream>;
+type TlsIncomingStream = tokio_rustls::server::TlsStream<TcpStream>;
+type TlsOutgoingStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -41,18 +42,19 @@ impl Pool {
         Self { injector }
     }
 
-    pub fn proxy(&mut self, mut incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
+    pub async fn proxy(&mut self, mut incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
         #[inline]
-        fn get_outgoing_conn(provider: &dyn Provider, pool: &mut Pool) -> Result<Conn, Error> {
-            if let Some(conn) = pool.select(provider.endpoint()) {
+        async fn get_outgoing_conn(
+            provider: &dyn Provider,
+            pool: &mut Pool,
+        ) -> Result<Conn, Error> {
+            if let Some(conn) = pool.select(provider.endpoint()).await {
                 Ok(conn)
             } else {
-                let stream = TcpStream::connect(provider.sock_address())?;
-                stream.set_read_timeout(Some(time::Duration::from_secs(30)))?;
-                stream.set_write_timeout(Some(time::Duration::from_secs(30)))?;
+                let stream = TcpStream::connect(provider.sock_address()).await?;
                 let conn = if provider.tls() {
-                    let client = new_tls_client(provider)?;
-                    Conn::new_tls(provider.endpoint(), stream, client)
+                    let connector = new_tls_connector();
+                    Conn::new_tls(provider.endpoint(), stream, connector).await?
                 } else {
                     Conn::new(provider.endpoint(), stream)
                 };
@@ -61,27 +63,11 @@ impl Pool {
         }
         let mut is_invalid_key = false;
         let mut is_bad_request = false;
-        incoming
-            .sock
-            .set_read_timeout(Some(crate::args().tcp_read_timeout))
-            .map_err(|e| ProxyError::Client(e.into()))?;
-        incoming
-            .sock
-            .set_write_timeout(Some(time::Duration::from_secs(30)))
-            .map_err(|e| ProxyError::Client(e.into()))?;
         loop {
-            let mut request = match http::Request::new(&mut incoming) {
+            let mut request = match http::Request::new(&mut incoming).await {
                 Ok(request) => request,
                 Err(Error::HeaderTooLarge | Error::InvalidHeader) => {
                     is_bad_request = true;
-                    break;
-                }
-                #[cfg(unix)]
-                Err(Error::IO(e)) if e.kind() == io::ErrorKind::WouldBlock => {
-                    break;
-                }
-                #[cfg(windows)]
-                Err(Error::IO(e)) if e.kind() == io::ErrorKind::TimedOut => {
                     break;
                 }
                 Err(e) => return Err(ProxyError::Client(e)),
@@ -101,15 +87,21 @@ impl Pool {
                 is_invalid_key = true;
                 break;
             }
-            let mut outgoing = get_outgoing_conn(provider, self).map_err(ProxyError::Server)?;
+            let mut outgoing = get_outgoing_conn(provider, self)
+                .await
+                .map_err(ProxyError::Server)?;
             request
                 .write_to(&mut outgoing)
+                .await
                 .map_err(ProxyError::Server)?;
             let incoming_conn_keep_alive = request.payload.conn_keep_alive;
             drop(request);
-            let mut response = http::Response::new(&mut outgoing).map_err(ProxyError::Abort)?;
+            let mut response = http::Response::new(&mut outgoing)
+                .await
+                .map_err(ProxyError::Abort)?;
             response
                 .write_to(&mut incoming)
+                .await
                 .map_err(ProxyError::Abort)?;
             let conn_keep_alive = response.payload.conn_keep_alive;
             drop(response);
@@ -125,22 +117,23 @@ impl Pool {
                 .write_all(
                     b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
+                .await
                 .map_err(|e| ProxyError::Client(e.into()))?;
         } else if is_bad_request {
             incoming
                 .write_all(
                     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
+                .await
                 .map_err(|e| ProxyError::Client(e.into()))?;
         }
         Ok(())
     }
 }
 
-fn new_tls_client(provider: &dyn Provider) -> Result<rustls::ClientConnection, Error> {
-    let client =
-        rustls::ClientConnection::new(Arc::clone(&*TLS_CLIENT_CONFIG), provider.server_name())?;
-    Ok(client)
+#[inline]
+fn new_tls_connector() -> tokio_rustls::TlsConnector {
+    tokio_rustls::TlsConnector::from(Arc::clone(&*TLS_CLIENT_CONFIG))
 }
 
 impl Pool {
@@ -148,7 +141,7 @@ impl Pool {
         self.injector.push(conn);
     }
 
-    fn select(&mut self, endpoint: &str) -> Option<Conn> {
+    async fn select(&mut self, endpoint: &str) -> Option<Conn> {
         let mut retry_times = 0;
         while retry_times < 3 {
             let Steal::Success(mut conn) = self.injector.steal() else {
@@ -161,7 +154,7 @@ impl Pool {
                 if is_injector_empty {
                     return None;
                 }
-            } else if conn.health_check().is_ok() {
+            } else if conn.health_check().await.is_ok() {
                 return Some(conn);
             }
             retry_times += 1;
@@ -183,48 +176,33 @@ impl Conn {
         }
     }
 
-    pub fn new_tls(endpoint: &str, stream: TcpStream, client: rustls::ClientConnection) -> Self {
-        let boxed_stream = Box::new(stream);
-        let boxed_client = Box::new(client);
-        let tls_stream = TlsOutgoingStream::new(Box::leak(boxed_client), Box::leak(boxed_stream));
-        Self {
+    pub async fn new_tls(
+        endpoint: &str,
+        stream: TcpStream,
+        connector: tokio_rustls::TlsConnector,
+    ) -> Result<Self, Error> {
+        let tls_stream = connector
+            .connect(endpoint.to_owned().try_into().unwrap(), stream)
+            .await?;
+        Ok(Self {
             endpoint: endpoint.to_string(),
             stream: Stream::Tls(tls_stream),
-        }
+        })
     }
 
-    pub fn health_check(&mut self) -> Result<(), Error> {
-        self.stream.set_nonblocking(true)?;
-        match self.stream.read(&mut [0; 1]) {
-            Ok(0) => return Err(Error::IO(io::Error::new(io::ErrorKind::NotConnected, ""))),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => (),
-            Err(e) => return Err(e.into()),
-            _ => {
-                return Err(Error::IO(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    "",
-                )))
-            }
-        }
-        self.stream.set_nonblocking(false)?;
-        let (ori_read_timeout, ori_write_timeout) =
-            (self.stream.read_timeout()?, self.stream.write_timeout()?);
+    pub async fn health_check(&mut self) -> Result<(), Error> {
+        self.stream.write_all(b"GET / HTTP/1.1\r\n").await?;
+        self.stream.write_all(b"Host: ").await?;
+        self.stream.write_all(self.endpoint.as_bytes()).await?;
+        self.stream.write_all(b"\r\n").await?;
         self.stream
-            .set_read_timeout(Some(time::Duration::from_millis(200)))?;
-        self.stream
-            .set_write_timeout(Some(time::Duration::from_millis(200)))?;
-        self.stream.write_all(b"GET / HTTP/1.1\r\n")?;
-        self.stream.write_all(b"Host: ")?;
-        self.stream.write_all(self.endpoint.as_bytes())?;
-        self.stream.write_all(b"\r\n")?;
-        self.stream.write_all(b"Connection: keep-alive\r\n\r\n")?;
-        self.stream.flush()?;
-        let mut response = http::Response::new(&mut self.stream)?;
-        response.write_to(&mut io::empty())?;
+            .write_all(b"Connection: keep-alive\r\n\r\n")
+            .await?;
+        self.stream.flush().await?;
+        let mut response = http::Response::new(&mut self.stream).await?;
+        response.write_to(&mut io::empty()).await?;
         let conn_keep_alive = response.payload.conn_keep_alive;
         drop(response);
-        self.stream.set_read_timeout(ori_read_timeout)?;
-        self.stream.set_write_timeout(ori_write_timeout)?;
         if !conn_keep_alive {
             return Err(Error::IO(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
@@ -235,78 +213,81 @@ impl Conn {
     }
 }
 
-impl Read for Conn {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.stream.read(buf)
+impl AsyncRead for Conn {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        pin!(&mut self.stream).poll_read(cx, buf)
     }
 }
 
-impl Write for Conn {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stream.write(buf)
+impl AsyncWrite for Conn {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        pin!(&mut self.stream).poll_write(cx, buf)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.stream.flush()
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        pin!(&mut self.stream).poll_flush(cx)
     }
-}
 
-impl Drop for Conn {
-    fn drop(&mut self) {
-        if let Stream::Tls(stream) = &mut self.stream {
-            unsafe {
-                drop(Box::from_raw(stream.conn));
-                drop(Box::from_raw(stream.sock));
-            }
-        }
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        pin!(&mut self.stream).poll_shutdown(cx)
     }
 }
 
 enum Stream {
     Tcp(TcpStream),
-    Tls(TlsOutgoingStream<'static>),
+    Tls(TlsOutgoingStream),
 }
 
-impl Deref for Stream {
-    type Target = TcpStream;
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Stream::Tcp(stream) => stream,
-            Stream::Tls(stream) => stream.sock,
+impl AsyncRead for Stream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Stream::Tcp(stream) => pin!(stream).poll_read(cx, buf),
+            Stream::Tls(stream) => pin!(stream).poll_read(cx, buf),
         }
     }
 }
 
-impl DerefMut for Stream {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Stream::Tcp(stream) => stream,
-            Stream::Tls(stream) => &mut stream.sock,
-        }
-    }
-}
-
-impl Read for Stream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Stream::Tcp(stream) => stream.read(buf),
-            Stream::Tls(stream) => stream.read(buf),
-        }
-    }
-}
-
-impl Write for Stream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Stream::Tcp(stream) => stream.write(buf),
-            Stream::Tls(stream) => stream.write(buf),
+impl AsyncWrite for Stream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        match &mut *self {
+            Stream::Tcp(stream) => pin!(stream).poll_write(cx, buf),
+            Stream::Tls(stream) => pin!(stream).poll_write(cx, buf),
         }
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Stream::Tcp(stream) => stream.flush(),
-            Stream::Tls(stream) => stream.flush(),
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        match &mut *self {
+            Stream::Tcp(stream) => pin!(stream).poll_flush(cx),
+            Stream::Tls(stream) => pin!(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        match &mut *self {
+            Stream::Tcp(stream) => pin!(stream).poll_shutdown(cx),
+            Stream::Tls(stream) => pin!(stream).poll_shutdown(cx),
         }
     }
 }

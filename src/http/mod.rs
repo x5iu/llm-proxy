@@ -1,8 +1,11 @@
 pub mod reader;
 
 use std::borrow::Cow;
-use std::io::{Cursor, Read, Write};
+use std::io::Cursor;
 use std::ops::Range;
+use std::pin::pin;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::Error;
 
@@ -31,26 +34,32 @@ pub struct Request<'a> {
 }
 
 impl<'a> Request<'a> {
-    pub fn new<S: Read + 'a>(stream: S) -> Result<Request<'a>, Error> {
+    pub async fn new<S: AsyncRead + Unpin + Send + Sync + 'a>(
+        stream: S,
+    ) -> Result<Request<'a>, Error> {
         Ok(Request {
-            payload: Payload::read_from(stream, DEFAULT_BUFFER_SIZE)?,
+            payload: Payload::read_from(stream, DEFAULT_BUFFER_SIZE).await?,
         })
     }
 
-    pub fn write_to<W: Write>(&mut self, writer: &mut W) -> Result<(), Error> {
+    pub async fn write_to<W: AsyncWrite + Unpin>(
+        &mut self,
+        mut writer: &mut W,
+    ) -> Result<(), Error> {
+        let mut writer = pin!(writer);
         #[cfg(debug_assertions)]
         let mut payload_blocks = Vec::new();
         loop {
-            let Some(block) = self.payload.next_block()? else {
+            let Some(block) = self.payload.next_block().await? else {
                 break;
             };
             if block.len() > 0 {
                 #[cfg(debug_assertions)]
                 payload_blocks.push(block.to_vec());
-                writer.write_all(&block)?;
+                writer.write_all(&block).await?;
             }
         }
-        writer.flush()?;
+        writer.flush().await?;
         #[cfg(debug_assertions)]
         log::info!(payload:serde = payload_blocks; "http_request_blocks");
         Ok(())
@@ -70,26 +79,32 @@ pub struct Response<'a> {
 }
 
 impl<'a> Response<'a> {
-    pub fn new<S: Read + 'a>(stream: S) -> Result<Response<'a>, Error> {
+    pub async fn new<S: AsyncRead + Unpin + Send + Sync + 'a>(
+        stream: S,
+    ) -> Result<Response<'a>, Error> {
         Ok(Response {
-            payload: Payload::read_from(stream, DEFAULT_BUFFER_SIZE)?,
+            payload: Payload::read_from(stream, DEFAULT_BUFFER_SIZE).await?,
         })
     }
 
-    pub fn write_to<W: Write>(&mut self, writer: &mut W) -> Result<(), Error> {
+    pub async fn write_to<W: AsyncWrite + Unpin>(
+        &mut self,
+        mut writer: &mut W,
+    ) -> Result<(), Error> {
+        let mut writer = pin!(writer);
         #[cfg(debug_assertions)]
         let mut payload_blocks = Vec::new();
         loop {
-            let Some(block) = self.payload.next_block()? else {
+            let Some(block) = self.payload.next_block().await? else {
                 break;
             };
             if block.len() > 0 {
                 #[cfg(debug_assertions)]
                 payload_blocks.push(block.to_vec());
-                writer.write_all(&block)?;
+                writer.write_all(&block).await?;
             }
         }
-        writer.flush()?;
+        writer.flush().await?;
         #[cfg(debug_assertions)]
         log::info!(payload:serde = payload_blocks; "http_response_blocks");
         Ok(())
@@ -119,15 +134,18 @@ macro_rules! select {
 }
 
 impl<'a> Payload<'a> {
-    fn read_from<S: Read + 'a>(mut stream: S, buffer_size: usize) -> Result<Payload<'a>, Error> {
+    async fn read_from<S: AsyncRead + Unpin + Send + Sync + 'a>(
+        mut stream: S,
+        buffer_size: usize,
+    ) -> Result<Payload<'a>, Error> {
         #[inline]
-        fn find_full_crlfs<S: Read>(
+        async fn find_full_crlfs<S: AsyncRead + Unpin + Send + Sync>(
             stream: &mut S,
             block: &mut [u8],
         ) -> Result<(Vec<usize>, usize), Error> {
             let mut n = 0;
             loop {
-                n += match stream.read(&mut block[n..]) {
+                n += match pin!(&mut *stream).read(&mut block[n..]).await {
                     Ok(0) => return Err(Error::InvalidHeader),
                     Ok(n) => n,
                     Err(e) => return Err(e.into()),
@@ -144,7 +162,7 @@ impl<'a> Payload<'a> {
             }
         }
         let mut block = vec![0; buffer_size].into_boxed_slice();
-        let (crlfs, advanced) = find_full_crlfs(&mut stream, &mut block)?;
+        let (crlfs, advanced) = find_full_crlfs(&mut stream, &mut block).await?;
         let Some(&first_double_crlf_index) = crlfs.last() else {
             return Err(Error::HeaderTooLarge);
         };
@@ -292,7 +310,7 @@ impl<'a> Payload<'a> {
         }
     }
 
-    fn next_block(&mut self) -> Result<Option<Cow<[u8]>>, Error> {
+    async fn next_block(&mut self) -> Result<Option<Cow<[u8]>>, Error> {
         match self.state {
             ReadState::Start => {
                 if self.header_current_chunk < self.header_chunks.len() {
@@ -317,7 +335,7 @@ impl<'a> Payload<'a> {
                     }
                 }
                 self.state = ReadState::HostHeader;
-                self.next_block()
+                Box::pin(self.next_block()).await
             }
             ReadState::HostHeader => {
                 self.state = ReadState::AuthHeader;
@@ -327,7 +345,7 @@ impl<'a> Payload<'a> {
                     select!(self.host().unwrap() => provider);
                     Ok(Some(Cow::Borrowed(provider.host_header().as_bytes())))
                 } else {
-                    self.next_block()
+                    Box::pin(self.next_block()).await
                 }
             }
             ReadState::AuthHeader => {
@@ -339,10 +357,10 @@ impl<'a> Payload<'a> {
                     if let Some(auth_header) = provider.auth_header() {
                         Ok(Some(Cow::Borrowed(auth_header.as_bytes())))
                     } else {
-                        self.next_block()
+                        Box::pin(self.next_block()).await
                     }
                 } else {
-                    self.next_block()
+                    Box::pin(self.next_block()).await
                 }
             }
             ReadState::ConnectionHeader => {
@@ -375,14 +393,14 @@ impl<'a> Payload<'a> {
                             log::info!(step = "ReadState::ReadBody"; "current_block:body_already_been_read");
                             Ok(Some(Cow::Borrowed(&self.internal_buffer[start..end])))
                         } else {
-                            self.next_block()
+                            Box::pin(self.next_block()).await
                         }
                     }
                 }
             }
             ReadState::UnreadBody => {
-                if let Body::Unread(reader) = &mut self.body {
-                    match reader.read(&mut self.internal_buffer) {
+                if let Body::Unread(ref mut reader) = &mut self.body {
+                    match pin!(reader).read(&mut self.internal_buffer).await {
                         Ok(0) => Ok(None),
                         Ok(n) => {
                             #[cfg(debug_assertions)]
@@ -531,7 +549,7 @@ impl<'a> Iterator for HeaderLines<'a> {
 
 enum Body<'a> {
     Read(Range<usize>),
-    Unread(Box<dyn Read + 'a>),
+    Unread(Box<dyn AsyncRead + Unpin + Send + Sync + 'a>),
 }
 
 #[derive(Copy, Clone)]

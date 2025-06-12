@@ -1,9 +1,10 @@
 use std::error::Error;
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time;
+
+use tokio::net::TcpListener;
 
 use clap::{Parser, Subcommand};
 
@@ -34,7 +35,8 @@ enum Command {
     },
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let llm_proxy = LLMProxy::parse();
     match llm_proxy.command {
         Some(Command::Start {
@@ -63,17 +65,23 @@ fn start(config: PathBuf, auto_reload_config: bool) -> Result<(), Box<dyn Error>
             _ => (),
         }
     }
-    executor.shutdown();
     log::info!(tls = true, debug = cfg!(debug_assertions); "exit_llm_proxy");
     Ok(())
 }
 
 fn run_background(executor: Arc<Executor>) {
-    thread::spawn(move || {
-        let listener = TcpListener::bind("0.0.0.0:443").unwrap();
-        for incoming in listener.incoming() {
-            let stream = incoming.unwrap();
-            executor.execute(stream);
+    tokio::spawn(async move {
+        let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let executor = Arc::clone(&executor);
+                    tokio::spawn(async move {
+                        executor.execute(stream).await;
+                    });
+                }
+                Err(e) => log::error!(error = e.to_string(); "tcp_accept_error"),
+            }
         }
     });
 }

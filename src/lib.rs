@@ -9,7 +9,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Once};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use rand::seq::IndexedRandom;
 
@@ -23,7 +23,7 @@ use provider::{new_provider, Provider};
 static PROG_ARGS: AtomicPtr<Arc<ProgArgs>> = AtomicPtr::new(ptr::null_mut());
 
 fn args() -> Arc<ProgArgs> {
-    unsafe { Arc::clone(&*PROG_ARGS.load(std::sync::atomic::Ordering::SeqCst)) }
+    unsafe { Arc::clone(&*PROG_ARGS.load(Ordering::SeqCst)) }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -35,7 +35,6 @@ struct Config<'a> {
     providers: Vec<ProviderConfig<'a>>,
     #[serde(skip_serializing)]
     auth_keys: Option<Vec<String>>,
-    tcp_read_timeout: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -92,7 +91,6 @@ pub fn force_update_config(path: impl AsRef<Path>) -> Result<(), Box<dyn std::er
 pub struct ProgArgs {
     tls_server_config: Arc<rustls::ServerConfig>,
     providers: Vec<Box<dyn Provider>>,
-    tcp_read_timeout: Duration,
     last_modified: SystemTime,
 }
 
@@ -127,7 +125,6 @@ impl ProgArgs {
         Ok(Self {
             tls_server_config: Arc::new(tls_server_config),
             providers,
-            tcp_read_timeout: Duration::from_secs(config.tcp_read_timeout.unwrap_or(60)),
             last_modified,
         })
     }
@@ -173,7 +170,7 @@ pub enum Error {
     IO(
         #[source]
         #[from]
-        std::io::Error,
+        io::Error,
     ),
 
     #[error("TLS error: {0}")]
