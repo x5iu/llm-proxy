@@ -2,7 +2,7 @@ use std::io::{self};
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncBufRead, AsyncRead, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, ReadBuf};
 
 use buf_reader::BufReader;
 
@@ -40,6 +40,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncRead for LimitedReader<R> {
 }
 
 pub struct ChunkedReader<R> {
+    data_only: bool,
     reader: BufReader<R>,
     unread_chunk_length: usize,
     finished: bool,
@@ -48,10 +49,17 @@ pub struct ChunkedReader<R> {
 impl<R: AsyncRead + Unpin + Send + Sync> ChunkedReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
+            data_only: false,
             reader: BufReader::new(reader, super::DEFAULT_BUFFER_SIZE),
             unread_chunk_length: 0,
             finished: false,
         }
+    }
+
+    pub fn data_only(reader: R) -> ChunkedReader<R> {
+        let mut reader = ChunkedReader::new(reader);
+        reader.data_only = true;
+        reader
     }
 
     fn internal_poll_read(
@@ -114,7 +122,12 @@ impl<R: AsyncRead + Unpin + Send + Sync> ChunkedReader<R> {
                 if length == 0 {
                     self.finished = true;
                 }
-                idx + CRLF.len() + length + CRLF.len()
+                if self.data_only {
+                    self.reader.consume(idx + CRLF.len());
+                    length + CRLF.len()
+                } else {
+                    idx + CRLF.len() + length + CRLF.len()
+                }
             };
         }
         let max = std::cmp::min(self.unread_chunk_length, buf.remaining());

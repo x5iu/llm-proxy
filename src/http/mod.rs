@@ -117,7 +117,7 @@ pub(crate) struct Payload<'a> {
     header_length: usize,
     host_range: Option<Range<usize>>,
     auth_range: Option<Range<usize>>,
-    body: Body<'a>,
+    pub(crate) body: Body<'a>,
     state: ReadState,
     header_chunks: [Option<Range<usize>>; 4],
     header_current_chunk: usize,
@@ -310,7 +310,15 @@ impl<'a> Payload<'a> {
         }
     }
 
-    async fn next_block(&mut self) -> Result<Option<Cow<[u8]>>, Error> {
+    pub(crate) fn block(&self) -> &[u8] {
+        self.internal_buffer.as_ref()
+    }
+
+    pub(crate) fn state(&self) -> ReadState {
+        self.state
+    }
+
+    pub(crate) async fn next_block(&mut self) -> Result<Option<Cow<[u8]>>, Error> {
         match self.state {
             ReadState::Start => {
                 if self.header_current_chunk < self.header_chunks.len() {
@@ -433,14 +441,24 @@ fn get_host(header: Option<&[u8]>) -> Option<&str> {
 
 #[inline]
 pub(crate) fn get_auth_query_range(header: &str, key: &str) -> Option<Range<usize>> {
-    let first_whitespace_idx = header.find(' ')?;
-    let second_whitespace_idx = {
-        let idx = header[first_whitespace_idx + 1..].find(' ')?;
-        first_whitespace_idx + 1 + idx
+    let url = if let Some(first_whitespace_idx) = header.find(' ') {
+        let second_whitespace_idx = {
+            if let Some(idx) = header[first_whitespace_idx + 1..].find(' ') {
+                first_whitespace_idx + 1 + idx
+            } else {
+                header.len()
+            }
+        };
+        &header[first_whitespace_idx + 1..second_whitespace_idx]
+    } else {
+        let next_whitespace_idx = header.find(' ').unwrap_or_else(|| header.len());
+        &header[..next_whitespace_idx]
     };
-    let url = &header[first_whitespace_idx + 1..second_whitespace_idx];
-    let question_mark_idx = url.find('?')?;
-    let mut query = &url[question_mark_idx + 1..];
+    let mut query = if let Some(question_mark_idx) = url.find('?') {
+        &url[question_mark_idx + 1..]
+    } else {
+        url
+    };
     if let Some(pound_sign_idx) = query.find('#') {
         query = &query[..pound_sign_idx]
     }
@@ -547,13 +565,13 @@ impl<'a> Iterator for HeaderLines<'a> {
     }
 }
 
-enum Body<'a> {
+pub(crate) enum Body<'a> {
     Read(Range<usize>),
     Unread(Box<dyn AsyncRead + Unpin + Send + Sync + 'a>),
 }
 
 #[derive(Copy, Clone)]
-enum ReadState {
+pub(crate) enum ReadState {
     Start,
     HostHeader,
     AuthHeader,

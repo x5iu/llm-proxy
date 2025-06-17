@@ -1,3 +1,5 @@
+use std::io::Cursor;
+use std::mem;
 use std::pin::{pin, Pin};
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
@@ -7,6 +9,8 @@ use tokio::net::TcpStream;
 
 use crossbeam::deque::{Injector, Steal};
 
+use bytes::{Buf, Bytes};
+
 use crate::http;
 use crate::provider::Provider;
 use crate::Error;
@@ -14,9 +18,10 @@ use crate::Error;
 static TLS_CLIENT_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
+    let mut config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Arc::new(config)
 });
 
@@ -33,6 +38,7 @@ pub enum ProxyError {
     Abort(Error),
 }
 
+#[derive(Clone)]
 pub struct Pool {
     injector: Arc<Injector<Conn>>,
 }
@@ -42,25 +48,23 @@ impl Pool {
         Self { injector }
     }
 
-    pub async fn proxy(&mut self, mut incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
-        #[inline]
-        async fn get_outgoing_conn(
-            provider: &dyn Provider,
-            pool: &mut Pool,
-        ) -> Result<Conn, Error> {
-            if let Some(conn) = pool.select(provider.endpoint()).await {
-                Ok(conn)
+    #[inline]
+    async fn get_outgoing_conn(&mut self, provider: &dyn Provider) -> Result<Conn, Error> {
+        if let Some(conn) = self.select(provider.endpoint()).await {
+            Ok(conn)
+        } else {
+            let stream = TcpStream::connect(provider.sock_address()).await?;
+            let conn = if provider.tls() {
+                let connector = new_tls_connector();
+                Conn::new_tls(provider.endpoint(), stream, connector).await?
             } else {
-                let stream = TcpStream::connect(provider.sock_address()).await?;
-                let conn = if provider.tls() {
-                    let connector = new_tls_connector();
-                    Conn::new_tls(provider.endpoint(), stream, connector).await?
-                } else {
-                    Conn::new(provider.endpoint(), stream)
-                };
-                Ok(conn)
-            }
+                Conn::new(provider.endpoint(), stream)
+            };
+            Ok(conn)
         }
+    }
+
+    pub async fn proxy(&mut self, mut incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
         let mut is_invalid_key = false;
         let mut is_bad_request = false;
         loop {
@@ -87,7 +91,8 @@ impl Pool {
                 is_invalid_key = true;
                 break;
             }
-            let mut outgoing = get_outgoing_conn(provider, self)
+            let mut outgoing = self
+                .get_outgoing_conn(provider)
                 .await
                 .map_err(ProxyError::Server)?;
             request
@@ -105,11 +110,11 @@ impl Pool {
                 .map_err(ProxyError::Abort)?;
             let conn_keep_alive = response.payload.conn_keep_alive;
             drop(response);
-            if !incoming_conn_keep_alive {
-                break;
-            }
             if conn_keep_alive {
                 self.add(outgoing);
+            }
+            if !incoming_conn_keep_alive {
+                break;
             }
         }
         if is_invalid_key {
@@ -126,6 +131,179 @@ impl Pool {
                 )
                 .await
                 .map_err(|e| ProxyError::Client(e.into()))?;
+        }
+        Ok(())
+    }
+
+    pub async fn proxy_h2(&mut self, incoming: &mut TlsIncomingStream) -> Result<(), ProxyError> {
+        macro_rules! invalid {
+            ($respond:expr, $status:expr) => {{
+                #[allow(unused)]
+                $respond.send_response(
+                    httplib::Response::builder()
+                        .version(httplib::Version::HTTP_2)
+                        .status($status)
+                        .body(())
+                        .unwrap(),
+                    true,
+                );
+                ()
+            }};
+        }
+        let mut stream = h2::server::handshake(incoming)
+            .await
+            .map_err(|e| ProxyError::Client(e.into()))?;
+        while let Some(next) = stream.accept().await {
+            let (mut request, mut respond) = next.map_err(|e| ProxyError::Client(e.into()))?;
+            let mut pool = self.clone();
+            tokio::spawn(async move {
+                let prog_args = crate::args();
+                let Some(authority) = request.uri().authority() else {
+                    return invalid!(respond, 400);
+                };
+                let Some(provider) = prog_args.select_provider(authority.host()) else {
+                    return invalid!(respond, 400);
+                };
+                let auth_key = if let Some(auth_header_key) = provider.auth_header_key() {
+                    request
+                        .headers()
+                        .get(auth_header_key.trim_end_matches(|ch| ch == ' ' || ch == ':'))
+                        .map(|v| v.to_str().ok())
+                        .flatten()
+                } else if let Some(auth_query_key) = provider.auth_query_key() {
+                    request
+                        .uri()
+                        .query()
+                        .map(|query| {
+                            http::get_auth_query_range(query, auth_query_key)
+                                .map(|range| &query[range])
+                        })
+                        .flatten()
+                } else {
+                    None
+                };
+                let Some(auth_key) = auth_key else {
+                    return invalid!(respond, 401);
+                };
+                if !provider.authenticate_key(auth_key).is_ok() {
+                    return invalid!(respond, 401);
+                }
+                request
+                    .headers_mut()
+                    .entry("Connection")
+                    .or_insert(httplib::HeaderValue::from_static("keep-alive"));
+                request
+                    .headers_mut()
+                    .entry("Host")
+                    .or_insert(httplib::HeaderValue::from_str(provider.host()).unwrap());
+                let mut req_headers = String::with_capacity(1024);
+                for (key, value) in request.headers() {
+                    req_headers.push_str(key.as_str());
+                    req_headers.push_str(": ");
+                    req_headers.push_str(String::from_utf8_lossy(value.as_bytes()).as_ref());
+                    req_headers.push_str("\r\n");
+                }
+                let req_str = format!(
+                    "{} {} HTTP/1.1\r\n{}\r\n",
+                    request.method(),
+                    request
+                        .uri()
+                        .path_and_query()
+                        .map(|pq| pq.as_str())
+                        .unwrap_or("/"),
+                    req_headers,
+                );
+                let req_reader = tokio::io::AsyncReadExt::chain(
+                    req_str.as_bytes(),
+                    H2StreamReader::new(request.into_body()),
+                );
+                let Ok(mut req) = http::Request::new(req_reader).await else {
+                    return invalid!(respond, 400);
+                };
+                let Ok(mut outgoing) = pool.get_outgoing_conn(provider).await else {
+                    return invalid!(respond, 502);
+                };
+                if let Err(_) = req.write_to(&mut outgoing).await {
+                    return invalid!(respond, 502);
+                };
+                let Ok(mut response) = http::Response::new(&mut outgoing).await else {
+                    return invalid!(respond, 502);
+                };
+                let mut headers = [httparse::EMPTY_HEADER; 64];
+                let mut parser = httparse::Response::new(&mut headers);
+                if let Err(_) = parser.parse(response.payload.block()) {
+                    return invalid!(respond, 502);
+                };
+                let mut builder = httplib::Response::builder()
+                    .version(httplib::Version::HTTP_2)
+                    .status(parser.code.unwrap_or(502));
+                let mut is_transfer_encoding_chunked = false;
+                for header in parser.headers {
+                    if header.name.eq_ignore_ascii_case("transfer-encoding")
+                        && header.value.eq_ignore_ascii_case(b"chunked")
+                    {
+                        is_transfer_encoding_chunked = true;
+                    }
+                    if !is_http2_invalid_headers(header.name) {
+                        builder = builder.header(header.name, header.value);
+                    }
+                }
+                if matches!(&mut response.payload.body, http::Body::Unread(_))
+                    && is_transfer_encoding_chunked
+                {
+                    let mut take = http::Body::Read(0..0);
+                    mem::swap(&mut take, &mut response.payload.body);
+                    let mut body = if let http::Body::Unread(reader) = take {
+                        http::Body::Unread(Box::new(http::reader::ChunkedReader::data_only(reader)))
+                    } else {
+                        unreachable!();
+                    };
+                    mem::swap(&mut body, &mut response.payload.body);
+                }
+                let mut send = match respond.send_response(builder.body(()).unwrap(), false) {
+                    Ok(send) => send,
+                    Err(e) => {
+                        log::error!(alpn = "h2", error = e.to_string(); "send_response_error");
+                        return invalid!(respond, 502);
+                    }
+                };
+                loop {
+                    let block = match response
+                        .payload
+                        .next_block()
+                        .await
+                        .map(|block| block.map(|cow| cow.to_vec()))
+                    {
+                        Ok(block) => block,
+                        Err(e) => {
+                            log::error!(alpn = "h2", error = e.to_string(); "read_block_error");
+                            return;
+                        }
+                    };
+                    if matches!(
+                        response.payload.state(),
+                        http::ReadState::ReadBody | http::ReadState::UnreadBody
+                    ) {
+                        let (data, is_eos) = if let Some(block) = block {
+                            send.reserve_capacity(block.len());
+                            (Bytes::from(block), false)
+                        } else {
+                            (Bytes::from_static(b""), true)
+                        };
+                        if let Err(e) = send.send_data(data, is_eos) {
+                            log::error!(alpn = "h2", error = e.to_string(); "send_data_error");
+                            return;
+                        }
+                        if is_eos {
+                            break;
+                        }
+                    }
+                }
+                if response.payload.conn_keep_alive {
+                    drop(response);
+                    pool.add(outgoing);
+                }
+            });
         }
         Ok(())
     }
@@ -290,4 +468,52 @@ impl AsyncWrite for Stream {
             Stream::Tls(stream) => pin!(stream).poll_shutdown(cx),
         }
     }
+}
+
+struct H2StreamReader {
+    bytes: Option<Cursor<bytes::Bytes>>,
+    stream: h2::RecvStream,
+}
+
+impl H2StreamReader {
+    fn new(stream: h2::RecvStream) -> Self {
+        H2StreamReader {
+            bytes: None,
+            stream,
+        }
+    }
+}
+
+impl AsyncRead for H2StreamReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if let Some(cursor) = &mut self.bytes {
+            if cursor.has_remaining() {
+                return pin!(cursor).poll_read(cx, buf);
+            }
+        }
+        let stream = match self.stream.poll_data(cx) {
+            Poll::Ready(Some(Ok(stream))) => stream,
+            Poll::Ready(Some(Err(e))) => {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, e)))
+            }
+            Poll::Ready(None) => return Poll::Ready(Ok(())),
+            Poll::Pending => return Poll::Pending,
+        };
+        self.bytes = Some(Cursor::new(stream));
+        self.poll_read(cx, buf)
+    }
+}
+
+#[inline]
+fn is_http2_invalid_headers(key: &str) -> bool {
+    key.eq_ignore_ascii_case(httplib::header::CONNECTION.as_str())
+        || key.eq_ignore_ascii_case(httplib::header::TRANSFER_ENCODING.as_str())
+        || key.eq_ignore_ascii_case(httplib::header::UPGRADE.as_str())
+        || key.eq_ignore_ascii_case("keep-alive")
+        || key.eq_ignore_ascii_case("proxy-connection")
+        || key.eq_ignore_ascii_case("content-length")
 }

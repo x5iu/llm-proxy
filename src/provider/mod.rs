@@ -73,6 +73,7 @@ pub trait Provider: Send + Sync {
     fn auth_header_key(&self) -> Option<&'static str>;
     fn has_auth_keys(&self) -> bool;
     fn authenticate(&self, auth: Option<&[u8]>) -> Result<(), AuthenticationError>;
+    fn authenticate_key(&self, key: &str) -> Result<(), AuthenticationError>;
     fn rewrite_first_header_block(&self, block: &[u8]) -> Option<Vec<u8>>;
 
     fn tls(&self) -> bool {
@@ -208,14 +209,14 @@ impl Provider for OpenAIProvider {
         if !http::is_header(header_str, http::HEADER_AUTHORIZATION) {
             return Err(AuthenticationError);
         }
-        let Some(key) = header_str[http::HEADER_AUTHORIZATION.len()..].strip_prefix("Bearer ")
-        else {
-            return Err(AuthenticationError);
-        };
+        self.authenticate_key(&header_str[http::HEADER_AUTHORIZATION.len()..])
+    }
+
+    fn authenticate_key(&self, key: &str) -> Result<(), AuthenticationError> {
         self.auth_keys
             .iter()
             .chain(self.provider_auth_keys.iter().flatten())
-            .find(|&k| k == key.trim())
+            .find(|&k| k == key.trim_start_matches("Bearer ").trim())
             .map(|_| ())
             .ok_or(AuthenticationError)
     }
@@ -344,10 +345,14 @@ impl Provider for GeminiProvider {
         };
         #[cfg(debug_assertions)]
         log::info!(provider = "gemini", key = key_str; "authentication");
+        self.authenticate_key(key_str)
+    }
+
+    fn authenticate_key(&self, key: &str) -> Result<(), AuthenticationError> {
         self.auth_keys
             .iter()
             .chain(self.provider_auth_keys.iter().flatten())
-            .find(|&k| k == key_str.trim())
+            .find(|&k| k == key.trim())
             .map(|_| ())
             .ok_or(AuthenticationError)
     }
@@ -496,7 +501,10 @@ impl Provider for AnthropicProvider {
         if !http::is_header(header_str, http::HEADER_X_API_KEY) {
             return Err(AuthenticationError);
         }
-        let key = &header_str[http::HEADER_X_API_KEY.len()..];
+        self.authenticate_key(&header_str[http::HEADER_X_API_KEY.len()..])
+    }
+
+    fn authenticate_key(&self, key: &str) -> Result<(), AuthenticationError> {
         self.auth_keys
             .iter()
             .chain(self.provider_auth_keys.iter().flatten())

@@ -105,8 +105,7 @@ impl ProgArgs {
         let mut tls_server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, private_key)?;
-        // Currently llm-proxy only supports HTTP/1.1 protocol
-        tls_server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        tls_server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let auth_keys = Arc::new(config.auth_keys.unwrap_or_else(Vec::new));
         let mut providers = Vec::new();
         config.providers.sort_by_key(|provider| provider.host);
@@ -178,6 +177,13 @@ pub enum Error {
         #[source]
         #[from]
         rustls::Error,
+    ),
+
+    #[error("h2 error: {0}")]
+    H2(
+        #[source]
+        #[from]
+        h2::Error,
     ),
 
     #[error("Header too large")]

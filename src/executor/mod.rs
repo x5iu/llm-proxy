@@ -29,22 +29,31 @@ impl Executor {
             }
         };
         let mut pool = Pool::new(Arc::clone(&self.conn_injector));
-        match pool.proxy(&mut tls_stream).await {
-            Err(ProxyError::Abort(e)) => {
-                log::error!(alpn = "http/1.1", error = e.to_string(); "proxy_abort_error");
+        let alpn = tls_stream.get_ref().1.alpn_protocol();
+        #[cfg(debug_assertions)]
+        log::info!(alpn = alpn.map(|v| String::from_utf8_lossy(v)); "alpn_protocol");
+        if matches!(alpn, Some(b"h2")) {
+            if let Err(e) = pool.proxy_h2(&mut tls_stream).await {
+                log::error!(alpn = "h2", error = e.to_string(); "proxy_h2_error");
             }
-            #[cfg(debug_assertions)]
-            Err(ProxyError::Client(e)) => {
-                log::warn!(alpn = "http/1.1", error = e.to_string(); "proxy_client_error");
+        } else {
+            match pool.proxy(&mut tls_stream).await {
+                Err(ProxyError::Abort(e)) => {
+                    log::error!(alpn = "http/1.1", error = e.to_string(); "proxy_abort_error");
+                }
+                #[cfg(debug_assertions)]
+                Err(ProxyError::Client(e)) => {
+                    log::warn!(alpn = "http/1.1", error = e.to_string(); "proxy_client_error");
+                }
+                Err(ProxyError::Server(e)) => {
+                    log::error!(alpn = "http/1.1", error = e.to_string(); "proxy_server_error");
+                    #[allow(unused)]
+                    tls_stream.write_all(
+                        b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    ).await;
+                }
+                _ => (),
             }
-            Err(ProxyError::Server(e)) => {
-                log::error!(alpn = "http/1.1", error = e.to_string(); "proxy_server_error");
-                #[allow(unused)]
-                tls_stream.write_all(
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                ).await;
-            }
-            _ => (),
         }
         #[allow(unused)]
         tls_stream.flush().await;
