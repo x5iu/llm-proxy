@@ -198,6 +198,10 @@ impl Pool {
                     .or_insert(httplib::HeaderValue::from_str(provider.host()).unwrap());
                 let mut req_headers = String::with_capacity(1024);
                 for (key, value) in request.headers() {
+                    // Skip Accept-Encoding header as HTTP/2 handles compression differently
+                    if key.as_str().eq_ignore_ascii_case("Accept-Encoding") {
+                        continue;
+                    }
                     req_headers.push_str(key.as_str());
                     req_headers.push_str(": ");
                     req_headers.push_str(String::from_utf8_lossy(value.as_bytes()).as_ref());
@@ -516,4 +520,5 @@ fn is_http2_invalid_headers(key: &str) -> bool {
         || key.eq_ignore_ascii_case("keep-alive")
         || key.eq_ignore_ascii_case("proxy-connection")
         || key.eq_ignore_ascii_case("content-length")
+        || key.eq_ignore_ascii_case("content-encoding")
 }
