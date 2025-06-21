@@ -286,7 +286,9 @@ impl Pool {
                         http::ReadState::ReadBody | http::ReadState::UnreadBody
                     ) {
                         let (data, is_eos) = if let Some(block) = block {
-                            send.reserve_capacity(block.len());
+                            if send.capacity() < block.len() {
+                                send.reserve_capacity(block.len());
+                            }
                             (Bytes::from(block), false)
                         } else {
                             (Bytes::from_static(b""), true)
