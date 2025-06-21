@@ -263,17 +263,20 @@ impl<'a> Payload<'a> {
                 Body::Read(start..end)
             }
         } else {
-            if transfer_encoding_chunked {
+            let unread: Box<dyn AsyncRead + Unpin + Send + Sync> = {
                 let (start, end) = (header_length + CRLF.len(), first_block_length);
                 first_block_length = start;
                 if start < end {
                     let already_read = Cursor::new(block[start..end].to_vec());
-                    Body::Unread(Box::new(ChunkedReader::new(already_read.chain(stream))))
+                    Box::new(already_read.chain(stream))
                 } else {
-                    Body::Unread(Box::new(ChunkedReader::new(stream)))
+                    Box::new(stream)
                 }
+            };
+            if transfer_encoding_chunked {
+                Body::Unread(Box::new(ChunkedReader::new(unread)))
             } else {
-                Body::Read(0..0)
+                Body::Unread(unread)
             }
         };
         Ok(Payload {

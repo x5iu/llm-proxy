@@ -4,12 +4,12 @@ use std::pin::{pin, Pin};
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
-use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
 use crossbeam::deque::{Injector, Steal};
 
-use bytes::{Buf, Bytes};
+use bytes::Buf;
 
 use crate::http;
 use crate::provider::Provider;
@@ -203,6 +203,10 @@ impl Pool {
                     req_headers.push_str(String::from_utf8_lossy(value.as_bytes()).as_ref());
                     req_headers.push_str("\r\n");
                 }
+                let has_content_length = request.headers().contains_key("content-length");
+                if !has_content_length {
+                    req_headers.push_str("Transfer-Encoding: chunked\r\n");
+                }
                 let req_str = format!(
                     "{} {} HTTP/1.1\r\n{}\r\n",
                     request.method(),
@@ -213,10 +217,13 @@ impl Pool {
                         .unwrap_or("/"),
                     req_headers,
                 );
-                let req_reader = tokio::io::AsyncReadExt::chain(
-                    req_str.as_bytes(),
-                    H2StreamReader::new(request.into_body()),
-                );
+                let h2_stream_reader = H2StreamReader::new(request.into_body());
+                let req_body: Box<dyn AsyncRead + Unpin + Send + Sync> = if has_content_length {
+                    Box::new(h2_stream_reader)
+                } else {
+                    Box::new(http::reader::ChunkedWriter::new(h2_stream_reader))
+                };
+                let req_reader = AsyncReadExt::chain(req_str.as_bytes(), req_body);
                 let Ok(mut req) = http::Request::new(req_reader).await else {
                     return invalid!(respond, 400);
                 };
@@ -289,9 +296,9 @@ impl Pool {
                             if send.capacity() < block.len() {
                                 send.reserve_capacity(block.len());
                             }
-                            (Bytes::from(block), false)
+                            (bytes::Bytes::from(block), false)
                         } else {
-                            (Bytes::from_static(b""), true)
+                            (bytes::Bytes::from_static(b""), true)
                         };
                         if let Err(e) = send.send_data(data, is_eos) {
                             log::error!(alpn = "h2", error = e.to_string(); "send_data_error");
@@ -492,7 +499,7 @@ impl AsyncRead for H2StreamReader {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    ) -> Poll<io::Result<()>> {
         if let Some(cursor) = &mut self.bytes {
             if cursor.has_remaining() {
                 return pin!(cursor).poll_read(cx, buf);

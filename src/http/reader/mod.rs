@@ -41,6 +41,84 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncRead for LimitedReader<R> {
     }
 }
 
+pub struct ChunkedWriter<R> {
+    buffer: Option<[u8; 3 + CRLF.len() + 4096 + CRLF.len()]>,
+    already_read: usize,
+    max_read: usize,
+    reader: R,
+    finished: bool,
+}
+
+impl<R> ChunkedWriter<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            buffer: Some([0; 3 + CRLF.len() + 4096 + CRLF.len()]),
+            already_read: 0,
+            max_read: 0,
+            reader,
+            finished: false,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin + Send + Sync> AsyncRead for ChunkedWriter<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.finished {
+            return Poll::Ready(Ok(()));
+        }
+        if self.already_read >= self.max_read {
+            self.already_read = 3 + CRLF.len();
+            let mut take = self.buffer.take().unwrap();
+            let mut buf = ReadBuf::new(&mut take[self.already_read..self.already_read + 4096]);
+            if let Poll::Pending = pin!(&mut self.reader).poll_read(cx, &mut buf)? {
+                return Poll::Pending;
+            }
+            let n = buf.filled().len();
+            self.finished = n == 0;
+            self.max_read = self.already_read + n;
+            const DIGITS: &[u8] = b"0123456789abcdef";
+            let mut len = if n > 0xff {
+                take[2] = DIGITS[n & 0xf];
+                take[1] = DIGITS[(n >> 4) & 0xf];
+                take[0] = DIGITS[(n >> 8) & 0xf];
+                3
+            } else if n > 0xf {
+                take[2] = DIGITS[n & 0xf];
+                take[1] = DIGITS[(n >> 4) & 0xf];
+                2
+            } else {
+                take[2] = DIGITS[n & 0xf];
+                1
+            };
+            take[3] = CRLF[0];
+            take[4] = CRLF[1];
+            len += CRLF.len();
+            self.already_read -= len;
+            take[self.max_read] = CRLF[0];
+            take[self.max_read + 1] = CRLF[1];
+            self.max_read += CRLF.len();
+            self.buffer.replace(take);
+        }
+        #[allow(unused_mut)]
+        if let Some(mut buffer) = &mut self.buffer {
+            if self.already_read < self.max_read {
+                if let Poll::Pending =
+                    pin!(&mut &buffer[self.already_read..self.max_read]).poll_read(cx, buf)?
+                {
+                    return Poll::Pending;
+                }
+                self.already_read += buf.filled().len();
+                return Poll::Ready(Ok(()));
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
 pub struct ChunkedReader<R> {
     data_only: bool,
     reader: BufReader<R>,
@@ -241,6 +319,11 @@ pub(crate) mod buf_reader {
                     me.buf.set_len(len + n);
                     if poll.is_pending() {
                         return Poll::Pending;
+                    } else if n == 0 {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "unexpected EOF",
+                        )));
                     }
                 }
             }
