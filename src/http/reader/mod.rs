@@ -1,9 +1,10 @@
-use std::future::Future;
 use std::io::{self};
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, ReadBuf};
+use super::CRLF;
+
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, ReadBuf};
 
 use buf_reader::BufReader;
 
@@ -44,7 +45,7 @@ pub struct ChunkedReader<R> {
     data_only: bool,
     reader: BufReader<R>,
     unread_chunk_length: usize,
-    first_read: bool,
+    cleaning: bool,
     finished: bool,
 }
 
@@ -54,7 +55,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> ChunkedReader<R> {
             data_only: false,
             reader: BufReader::new(reader, super::DEFAULT_BUFFER_SIZE),
             unread_chunk_length: 0,
-            first_read: true,
+            cleaning: false,
             finished: false,
         }
     }
@@ -98,18 +99,24 @@ impl<R: AsyncRead + Unpin + Send + Sync> ChunkedReader<R> {
                 "header line too longs",
             )))
         }
-        use super::CRLF;
+        if self.cleaning {
+            if self.data_only {
+                let buffer = if self.reader.buffer().len() < CRLF.len() {
+                    let Poll::Ready(buffer) = Pin::new(&mut self.reader).poll_fill_buf(cx)? else {
+                        return Poll::Pending;
+                    };
+                    buffer
+                } else {
+                    self.reader.buffer()
+                };
+                debug_assert_eq!(&buffer[..CRLF.len()], CRLF);
+                self.reader.consume(CRLF.len());
+            }
+            self.cleaning = false;
+        }
         if self.unread_chunk_length == 0 {
             if self.finished {
                 return Poll::Ready(Ok(()));
-            }
-            if !self.first_read {
-                if self.data_only {
-                    let mut two = [0; CRLF.len()];
-                    if let Poll::Pending = pin!(self.reader.read_exact(&mut two)).poll(cx) {
-                        return Poll::Pending;
-                    }
-                }
             }
             let Poll::Ready(idx) = poll_find_next_crlf(&mut self.reader, cx)? else {
                 return Poll::Pending;
@@ -140,15 +147,13 @@ impl<R: AsyncRead + Unpin + Send + Sync> ChunkedReader<R> {
                     idx + CRLF.len() + length + CRLF.len()
                 }
             };
-            if self.first_read {
-                self.first_read = false;
-            }
         }
         let max = std::cmp::min(self.unread_chunk_length, buf.remaining());
         let mut real_buf = ReadBuf::new(&mut buf.initialize_unfilled()[..max]);
         let poll = pin!(&mut self.reader).poll_read(cx, &mut real_buf)?;
         let n = real_buf.filled().len();
         self.unread_chunk_length -= n;
+        self.cleaning = self.unread_chunk_length == 0;
         buf.advance(n);
         poll.map(|_| Ok(()))
     }
