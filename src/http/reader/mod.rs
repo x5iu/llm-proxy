@@ -75,6 +75,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncRead for ChunkedWriter<R> {
             let mut take = self.buffer.take().unwrap();
             let mut buf = ReadBuf::new(&mut take[self.already_read..self.already_read + 4096]);
             if let Poll::Pending = pin!(&mut self.reader).poll_read(cx, &mut buf)? {
+                self.buffer.replace(take);
                 return Poll::Pending;
             }
             let n = buf.filled().len();
