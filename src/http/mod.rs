@@ -276,7 +276,13 @@ impl<'a> Payload<'a> {
             if transfer_encoding_chunked {
                 Body::Unread(Box::new(ChunkedReader::new(unread)))
             } else {
-                Body::Unread(unread)
+                // If there is neither a Content-Length nor a chunked Transfer-Encoding, we consider
+                // it as not carrying a request body.
+                //
+                // Typically, when the request comes from h2, even if there is no Content-Length, we
+                // will manually add a Transfer-Encoding: chunked header (although in h2,
+                // Transfer-Encoding is not a valid header).
+                Body::Read(0..0)
             }
         };
         Ok(Payload {
