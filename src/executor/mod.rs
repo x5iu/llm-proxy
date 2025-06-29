@@ -18,6 +18,12 @@ impl Executor {
         }
     }
 
+    pub fn run_health_check(&self) {
+        let pool = Pool::new(Arc::clone(&self.conn_injector));
+        let prog_args = crate::static_ref_args();
+        tokio::spawn(async move { prog_args.run_health_check(pool).await });
+    }
+
     pub async fn execute(&self, stream: TcpStream) {
         let tls_acceptor =
             tokio_rustls::TlsAcceptor::from(Arc::clone(&crate::args().tls_server_config));

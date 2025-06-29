@@ -31,7 +31,11 @@ enum Command {
 
         /// Auto watch and reload config file
         #[arg(long = "auto-reload-config")]
-        auto_reload_config: Option<bool>,
+        auto_reload_config: bool,
+
+        /// Enable provider health check
+        #[arg(long = "enable-health-check")]
+        enable_health_check: bool,
     },
 }
 
@@ -42,18 +46,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::Start {
                  config,
                  auto_reload_config,
-             }) => start(config, auto_reload_config.unwrap_or_default())?,
+                 enable_health_check,
+             }) => start(
+            config,
+            auto_reload_config,
+            enable_health_check,
+        )?,
         _ => (),
     }
     Ok(())
 }
 
-fn start(config: PathBuf, auto_reload_config: bool) -> Result<(), Box<dyn Error>> {
+fn start(
+    config: PathBuf,
+    auto_reload_config: bool,
+    enable_health_check: bool,
+) -> Result<(), Box<dyn Error>> {
     llm_proxy::load_config(&config)?;
     let mut signals =
         SignalsInfo::<SignalOnly>::new([signal::SIGTERM, signal::SIGINT, signal::SIGHUP])?;
     let executor = Arc::new(Executor::new());
-    run_background(Arc::clone(&executor));
+    run_background(Arc::clone(&executor), enable_health_check);
     if auto_reload_config {
         watch_config(config.clone());
     }
@@ -69,7 +82,10 @@ fn start(config: PathBuf, auto_reload_config: bool) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-fn run_background(executor: Arc<Executor>) {
+fn run_background(executor: Arc<Executor>, enable_health_check: bool) {
+    if enable_health_check {
+        executor.run_health_check();
+    }
     tokio::spawn(async move {
         let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
         loop {

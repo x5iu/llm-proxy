@@ -1,5 +1,10 @@
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::http;
 
@@ -12,6 +17,7 @@ pub fn new_provider(
     api_key: Option<&str>,
     auth_keys: Arc<Vec<String>>,
     provider_auth_keys: Option<Vec<String>>,
+    health_check_config: Option<HealthCheckConfig>,
 ) -> Result<Box<dyn Provider>, Box<dyn std::error::Error>> {
     match kind {
         "openai" => Ok(Box::new(OpenAIProvider::new(
@@ -22,6 +28,7 @@ pub fn new_provider(
             api_key,
             auth_keys,
             provider_auth_keys,
+            health_check_config,
         )?)),
         "gemini" => Ok(Box::new(GeminiProvider::new(
             host,
@@ -31,6 +38,7 @@ pub fn new_provider(
             api_key,
             auth_keys,
             provider_auth_keys,
+            health_check_config,
         )?)),
         "anthropic" => Ok(Box::new(AnthropicProvider::new(
             host,
@@ -40,6 +48,7 @@ pub fn new_provider(
             api_key,
             auth_keys,
             provider_auth_keys,
+            health_check_config,
         )?)),
         _ => Err(format!("Unsupported provider type: {:?}", kind).into()),
     }
@@ -79,6 +88,27 @@ pub trait Provider: Send + Sync {
     fn tls(&self) -> bool {
         true
     }
+
+    fn is_healthy(&self) -> bool;
+    fn set_healthy(&self, healthy: bool);
+
+    fn health_check<'a: 'stream, 'stream>(
+        &'a self,
+        #[allow(unused)] stream: &'stream mut dyn AsyncReadWrite,
+    ) -> Pin<Box<dyn Future<Output=Result<(), Box<dyn std::error::Error>>> + Send + 'stream>>
+    {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
+pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+
+impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct HealthCheckConfig {
+    path: String,
+    body: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +125,8 @@ pub struct OpenAIProvider {
     server_name: rustls_pki_types::ServerName<'static>,
     auth_keys: Arc<Vec<String>>,
     provider_auth_keys: Option<Vec<String>>,
+    is_healthy: AtomicBool,
+    health_check_config: Option<HealthCheckConfig>,
 }
 
 impl OpenAIProvider {
@@ -106,6 +138,7 @@ impl OpenAIProvider {
         api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
+        health_check_config: Option<HealthCheckConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let static_host = Box::leak(host.to_string().into_boxed_str());
         let static_endpoint = Box::leak(endpoint.to_string().into_boxed_str());
@@ -134,6 +167,8 @@ impl OpenAIProvider {
             server_name,
             auth_keys,
             provider_auth_keys,
+            is_healthy: AtomicBool::new(true),
+            health_check_config,
         })
     }
 }
@@ -228,6 +263,32 @@ impl Provider for OpenAIProvider {
     fn tls(&self) -> bool {
         self.tls
     }
+
+    fn is_healthy(&self) -> bool {
+        self.is_healthy.load(Ordering::SeqCst)
+    }
+
+    fn set_healthy(&self, healthy: bool) {
+        self.is_healthy.store(healthy, Ordering::SeqCst)
+    }
+
+    fn health_check<'a: 'stream, 'stream>(
+        &'a self,
+        stream: &'stream mut dyn AsyncReadWrite,
+    ) -> Pin<Box<dyn Future<Output=Result<(), Box<dyn std::error::Error>>> + Send + 'stream>>
+    {
+        if let Some(ref cfg) = self.health_check_config {
+            Box::pin(health_check(
+                stream,
+                self.endpoint().as_bytes(),
+                cfg.path.as_bytes(),
+                self.auth_header().map(|v| v.as_bytes()),
+                cfg.body.as_bytes(),
+            ))
+        } else {
+            Box::pin(async { Ok(()) })
+        }
+    }
 }
 
 pub struct GeminiProvider {
@@ -240,6 +301,8 @@ pub struct GeminiProvider {
     server_name: rustls_pki_types::ServerName<'static>,
     auth_keys: Arc<Vec<String>>,
     provider_auth_keys: Option<Vec<String>>,
+    is_healthy: AtomicBool,
+    health_check_config: Option<HealthCheckConfig>,
 }
 
 impl GeminiProvider {
@@ -251,6 +314,7 @@ impl GeminiProvider {
         api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
+        health_check_config: Option<HealthCheckConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let Some(api_key) = api_key else {
             return Err("gemini: missing `api_key`".into());
@@ -276,6 +340,8 @@ impl GeminiProvider {
             server_name,
             auth_keys,
             provider_auth_keys,
+            is_healthy: AtomicBool::new(true),
+            health_check_config,
         })
     }
 }
@@ -374,6 +440,36 @@ impl Provider for GeminiProvider {
     fn tls(&self) -> bool {
         self.tls
     }
+
+    fn is_healthy(&self) -> bool {
+        self.is_healthy.load(Ordering::SeqCst)
+    }
+
+    fn set_healthy(&self, healthy: bool) {
+        self.is_healthy.store(healthy, Ordering::SeqCst)
+    }
+
+    fn health_check<'a: 'stream, 'stream>(
+        &'a self,
+        stream: &'stream mut dyn AsyncReadWrite,
+    ) -> Pin<Box<dyn Future<Output=Result<(), Box<dyn std::error::Error>>> + Send + 'stream>>
+    {
+        if let Some(ref cfg) = self.health_check_config {
+            Box::pin(async move {
+                let path = format!("{}?key={}", cfg.path, self.api_key);
+                health_check(
+                    stream,
+                    self.endpoint().as_bytes(),
+                    path.as_bytes(),
+                    None,
+                    cfg.body.as_bytes(),
+                )
+                    .await
+            })
+        } else {
+            Box::pin(async move { Ok(()) })
+        }
+    }
 }
 
 pub struct AnthropicProvider {
@@ -386,6 +482,8 @@ pub struct AnthropicProvider {
     server_name: rustls_pki_types::ServerName<'static>,
     auth_keys: Arc<Vec<String>>,
     provider_auth_keys: Option<Vec<String>>,
+    is_healthy: AtomicBool,
+    health_check_config: Option<HealthCheckConfig>,
 }
 
 impl AnthropicProvider {
@@ -397,6 +495,7 @@ impl AnthropicProvider {
         api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
+        health_check_config: Option<HealthCheckConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let Some(api_key) = api_key else {
             return Err("anthropic: missing `api_key`".into());
@@ -428,6 +527,8 @@ impl AnthropicProvider {
             server_name,
             auth_keys,
             provider_auth_keys,
+            is_healthy: AtomicBool::new(true),
+            health_check_config,
         })
     }
 }
@@ -520,4 +621,68 @@ impl Provider for AnthropicProvider {
     fn tls(&self) -> bool {
         self.tls
     }
+
+    fn is_healthy(&self) -> bool {
+        self.is_healthy.load(Ordering::SeqCst)
+    }
+
+    fn set_healthy(&self, healthy: bool) {
+        self.is_healthy.store(healthy, Ordering::SeqCst)
+    }
+
+    fn health_check<'a: 'stream, 'stream>(
+        &'a self,
+        stream: &'stream mut dyn AsyncReadWrite,
+    ) -> Pin<Box<dyn Future<Output=Result<(), Box<dyn std::error::Error>>> + Send + 'stream>>
+    {
+        if let Some(ref cfg) = self.health_check_config {
+            Box::pin(health_check(
+                stream,
+                self.endpoint().as_bytes(),
+                cfg.path.as_bytes(),
+                self.auth_header().map(|v| v.as_bytes()),
+                cfg.body.as_bytes(),
+            ))
+        } else {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+}
+
+async fn health_check(
+    stream: &mut dyn AsyncReadWrite,
+    endpoint: &[u8],
+    path: &[u8],
+    authorization: Option<&[u8]>,
+    req: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    stream.write_all(b"POST ").await?;
+    stream.write_all(path).await?;
+    stream.write_all(b" HTTP/1.1\r\n").await?;
+    stream.write_all(b"Host: ").await?;
+    stream.write_all(endpoint).await?;
+    stream.write_all(b"\r\n").await?;
+    stream.write_all(b"Connection: keep-alive\r\n").await?;
+    stream
+        .write_all(b"Content-Type: application/json\r\n")
+        .await?;
+    stream.write_all(b"Content-Length: ").await?;
+    stream.write_all(req.len().to_string().as_bytes()).await?;
+    stream.write_all(b"\r\n").await?;
+    if let Some(authorization) = authorization {
+        stream.write_all(authorization).await?;
+    }
+    stream.write_all(b"\r\n").await?;
+    stream.write_all(req).await?;
+    let response = http::Response::new(stream).await?;
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut parser = httparse::Response::new(&mut headers);
+    parser.parse(response.payload.block())?;
+    let Some(http_status_code) = parser.code else {
+        return Err("unknown http status code".into());
+    };
+    if http_status_code / 100 != 2 {
+        return Err(format!("invalid http status code: {}", http_status_code).into());
+    }
+    Ok(())
 }

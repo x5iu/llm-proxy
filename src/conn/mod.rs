@@ -49,7 +49,7 @@ impl Pool {
     }
 
     #[inline]
-    async fn get_outgoing_conn(&mut self, provider: &dyn Provider) -> Result<Conn, Error> {
+    pub(crate) async fn get_outgoing_conn(&mut self, provider: &dyn Provider) -> Result<Conn, Error> {
         if let Some(conn) = self.select(provider.endpoint()).await {
             Ok(conn)
         } else {
@@ -325,7 +325,7 @@ fn new_tls_connector() -> tokio_rustls::TlsConnector {
 }
 
 impl Pool {
-    fn add(&mut self, conn: Conn) {
+    pub(crate) fn add(&mut self, conn: Conn) {
         self.injector.push(conn);
     }
 
