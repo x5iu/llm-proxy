@@ -109,6 +109,7 @@ impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sy
 pub struct HealthCheckConfig {
     path: String,
     body: String,
+    headers: Option<Vec<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -283,6 +284,9 @@ impl Provider for OpenAIProvider {
                 self.endpoint().as_bytes(),
                 cfg.path.as_bytes(),
                 self.auth_header().map(|v| v.as_bytes()),
+                cfg.headers
+                    .as_deref()
+                    .map(|v| v.iter().map(|x| x.trim().as_bytes())),
                 cfg.body.as_bytes(),
             ))
         } else {
@@ -462,6 +466,9 @@ impl Provider for GeminiProvider {
                     self.endpoint().as_bytes(),
                     path.as_bytes(),
                     None,
+                    cfg.headers
+                        .as_deref()
+                        .map(|v| v.iter().map(|x| x.trim().as_bytes())),
                     cfg.body.as_bytes(),
                 )
                     .await
@@ -641,6 +648,9 @@ impl Provider for AnthropicProvider {
                 self.endpoint().as_bytes(),
                 cfg.path.as_bytes(),
                 self.auth_header().map(|v| v.as_bytes()),
+                cfg.headers
+                    .as_deref()
+                    .map(|v| v.iter().map(|x| x.trim().as_bytes())),
                 cfg.body.as_bytes(),
             ))
         } else {
@@ -654,6 +664,7 @@ async fn health_check(
     endpoint: &[u8],
     path: &[u8],
     authorization: Option<&[u8]>,
+    headers: Option<impl Iterator<Item=&[u8]>>,
     req: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     stream.write_all(b"POST ").await?;
@@ -671,6 +682,12 @@ async fn health_check(
     stream.write_all(b"\r\n").await?;
     if let Some(authorization) = authorization {
         stream.write_all(authorization).await?;
+    }
+    if let Some(headers) = headers {
+        for header in headers {
+            stream.write_all(header).await?;
+            stream.write_all(b"\r\n").await?;
+        }
     }
     stream.write_all(b"\r\n").await?;
     stream.write_all(req).await?;
