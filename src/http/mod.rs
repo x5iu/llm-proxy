@@ -21,6 +21,7 @@ const HEADER_CONTENT_LENGTH: &str = "Content-Length: ";
 const HEADER_TRANSFER_ENCODING: &str = "Transfer-Encoding: ";
 const HEADER_HOST: &str = "Host: ";
 pub(crate) const HEADER_AUTHORIZATION: &str = "Authorization: ";
+pub(crate) const HEADER_X_GOOG_API_KEY: &str = "x-goog-api-key: ";
 pub(crate) const HEADER_X_API_KEY: &str = "X-API-Key: ";
 const HEADER_CONNECTION: &str = "Connection: ";
 
@@ -214,30 +215,29 @@ impl<'a> Payload<'a> {
                 .map(|range| &block[range.start..range.end]),
         ) {
             select!(host => provider);
-            // Only when the provider has supplied a `api_key` or an `auth_keys` will the
-            // authentication-related content in the request headers be captured for later
-            // interception and replacement. If the provider has not supplied a `api_key`, nor an
-            // `auth_keys`, authentication-related content in the request headers will not be
-            // intercepted or replaced, and the original authentication information from the request
-            // will be used.
-            if provider.auth_header().is_some() || provider.has_auth_keys() {
-                if let Some(auth_header_key) = provider.auth_header_key() {
-                    let header_lines = HeaderLines::new(&crlfs, header);
-                    for line in header_lines.skip(1) {
-                        let Ok(header) = std::str::from_utf8(line) else {
-                            return Err(Error::InvalidHeader);
+            // Due to the particularity of Gemini (aka googleapis), we will first match the
+            // corresponding Authorization information from the Headers. If there is no
+            // Authorization information in the Headers, we will then try to match the key
+            // information from the Query.
+            if let Some(auth_header_key) = provider.auth_header_key() {
+                let header_lines = HeaderLines::new(&crlfs, header);
+                for line in header_lines.skip(1) {
+                    let Ok(header) = std::str::from_utf8(line) else {
+                        return Err(Error::InvalidHeader);
+                    };
+                    if is_header(header, auth_header_key) {
+                        let start = {
+                            let block_start = &block[0] as *const u8 as usize;
+                            let auth_start = &line[0] as *const u8 as usize;
+                            auth_start - block_start
                         };
-                        if is_header(header, auth_header_key) {
-                            let start = {
-                                let block_start = &block[0] as *const u8 as usize;
-                                let auth_start = &line[0] as *const u8 as usize;
-                                auth_start - block_start
-                            };
-                            header_chunks[1] = Some(start..start + line.len());
-                            auth_range = Some(start..start + line.len());
-                        }
+                        header_chunks[1] = Some(start..start + line.len());
+                        auth_range = Some(start..start + line.len());
                     }
-                } else if let Some(auth_query_key) = provider.auth_query_key() {
+                }
+            }
+            if auth_range.is_none() {
+                if let Some(auth_query_key) = provider.auth_query_key() {
                     let Some(request_line) = HeaderLines::new(&crlfs, header).next() else {
                         return Err(Error::InvalidHeader);
                     };

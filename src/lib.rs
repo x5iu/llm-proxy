@@ -9,7 +9,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Once};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use rand::seq::IndexedRandom;
 
@@ -24,10 +24,6 @@ static PROG_ARGS: AtomicPtr<Arc<ProgArgs>> = AtomicPtr::new(ptr::null_mut());
 
 fn args() -> Arc<ProgArgs> {
     unsafe { Arc::clone(&*PROG_ARGS.load(Ordering::SeqCst)) }
-}
-
-fn static_ref_args() -> &'static ProgArgs {
-    unsafe { &**PROG_ARGS.load(Ordering::SeqCst) }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -170,37 +166,6 @@ impl ProgArgs {
         self.providers[start..=end]
             .choose(&mut rand::rng())
             .map(|provider| &**provider)
-    }
-
-    async fn run_health_check(&self, mut pool: conn::Pool)
-    where
-        Self: 'static,
-    {
-        loop {
-            for provider in self.providers.iter() {
-                let fut = async {
-                    let Ok(mut conn) = pool.get_outgoing_conn(&**provider).await else {
-                        provider.set_healthy(false);
-                        return;
-                    };
-                    if let Err(e) = provider.health_check(&mut conn).await {
-                        log::warn!(provider = provider.host(), error = e.to_string(); "health_check_error");
-                        provider.set_healthy(false);
-                    } else {
-                        provider.set_healthy(true);
-                    }
-                    pool.add(conn);
-                };
-                if tokio::time::timeout(Duration::from_secs(30), fut)
-                    .await
-                    .is_err()
-                {
-                    log::warn!(provider = provider.host(); "health_check_timeout");
-                    provider.set_healthy(false);
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(self.health_check_interval)).await;
-        }
     }
 }
 

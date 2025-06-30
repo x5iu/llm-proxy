@@ -150,7 +150,8 @@ impl OpenAIProvider {
             Box::leak(header.into_boxed_str())
         };
         let auth_header = api_key.map(|api_key| {
-            let mut header = String::from("Authorization: Bearer ");
+            let mut header = String::from(http::HEADER_AUTHORIZATION);
+            header.push_str("Bearer ");
             header.push_str(api_key);
             header.push_str("\r\n");
             &*Box::leak(header.into_boxed_str())
@@ -301,6 +302,7 @@ pub struct GeminiProvider {
     tls: bool,
     api_key: String,
     host_header: &'static str,
+    auth_header: &'static str,
     sock_address: String,
     server_name: rustls_pki_types::ServerName<'static>,
     auth_keys: Arc<Vec<String>>,
@@ -331,6 +333,12 @@ impl GeminiProvider {
             header.push_str("\r\n");
             Box::leak(header.into_boxed_str())
         };
+        let auth_header = {
+            let mut header = String::from(http::HEADER_X_GOOG_API_KEY);
+            header.push_str(api_key);
+            header.push_str("\r\n");
+            Box::leak(header.into_boxed_str())
+        };
         let server_name = (&*static_endpoint).try_into()?;
         let port = port.unwrap_or_else(|| if tls { 443 } else { 80 });
         let sock_address = format!("{}:{}", static_endpoint, port);
@@ -340,6 +348,7 @@ impl GeminiProvider {
             tls,
             api_key: api_key.to_string(),
             host_header,
+            auth_header,
             sock_address,
             server_name,
             auth_keys,
@@ -356,6 +365,7 @@ impl Drop for GeminiProvider {
             drop(Box::from_raw(self.host as *const str as *mut str));
             drop(Box::from_raw(self.endpoint as *const str as *mut str));
             drop(Box::from_raw(self.host_header as *const str as *mut str));
+            drop(Box::from_raw(self.auth_header as *const str as *mut str));
         }
     }
 }
@@ -390,11 +400,11 @@ impl Provider for GeminiProvider {
     }
 
     fn auth_header(&self) -> Option<&'static str> {
-        None
+        Some(self.auth_header)
     }
 
     fn auth_header_key(&self) -> Option<&'static str> {
-        None
+        Some(http::HEADER_X_GOOG_API_KEY)
     }
 
     fn has_auth_keys(&self) -> bool {
@@ -408,13 +418,16 @@ impl Provider for GeminiProvider {
         let Some(key) = key else {
             return Err(AuthenticationError);
         };
-        let Ok(key_str) = std::str::from_utf8(key) else {
+        let Ok(mut key_str) = std::str::from_utf8(key) else {
             #[cfg(debug_assertions)]
             log::error!(provider = "gemini", key:serde = key.to_vec(); "invalid_authentication_key");
             return Err(AuthenticationError);
         };
         #[cfg(debug_assertions)]
         log::info!(provider = "gemini", key = key_str; "authentication");
+        if http::is_header(key_str, http::HEADER_X_GOOG_API_KEY) {
+            key_str = &key_str[http::HEADER_X_GOOG_API_KEY.len()..];
+        }
         self.authenticate_key(key_str)
     }
 
@@ -516,7 +529,7 @@ impl AnthropicProvider {
             Box::leak(header.into_boxed_str())
         };
         let auth_header = {
-            let mut header = String::from("X-API-Key: ");
+            let mut header = String::from(http::HEADER_X_API_KEY);
             header.push_str(api_key);
             header.push_str("\r\n");
             Box::leak(header.into_boxed_str())

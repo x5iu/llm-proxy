@@ -49,7 +49,10 @@ impl Pool {
     }
 
     #[inline]
-    pub(crate) async fn get_outgoing_conn(&mut self, provider: &dyn Provider) -> Result<Conn, Error> {
+    pub(crate) async fn get_outgoing_conn(
+        &mut self,
+        provider: &dyn Provider,
+    ) -> Result<Conn, Error> {
         if let Some(conn) = self.select(provider.endpoint()).await {
             Ok(conn)
         } else {
@@ -164,28 +167,30 @@ impl Pool {
                 let Some(provider) = prog_args.select_provider(authority.host()) else {
                     return invalid!(respond, 400);
                 };
-                let auth_key = if let Some(auth_header_key) = provider.auth_header_key() {
-                    request
+                let mut auth_key = None;
+                if let Some(auth_header_key) = provider.auth_header_key() {
+                    auth_key = request
                         .headers()
                         .get(auth_header_key.trim_end_matches(|ch| ch == ' ' || ch == ':'))
                         .map(|v| v.to_str().ok())
-                        .flatten()
-                } else if let Some(auth_query_key) = provider.auth_query_key() {
-                    request
-                        .uri()
-                        .query()
-                        .map(|query| {
-                            http::get_auth_query_range(query, auth_query_key)
-                                .map(|range| &query[range])
-                        })
-                        .flatten()
-                } else {
-                    None
-                };
+                        .flatten();
+                }
+                if auth_key.is_none() {
+                    if let Some(auth_query_key) = provider.auth_query_key() {
+                        auth_key = request
+                            .uri()
+                            .query()
+                            .map(|query| {
+                                http::get_auth_query_range(query, auth_query_key)
+                                    .map(|range| &query[range])
+                            })
+                            .flatten()
+                    }
+                }
                 let Some(auth_key) = auth_key else {
                     return invalid!(respond, 401);
                 };
-                if !provider.authenticate_key(auth_key).is_ok() {
+                if provider.has_auth_keys() && !provider.authenticate_key(auth_key).is_ok() {
                     return invalid!(respond, 401);
                 }
                 request

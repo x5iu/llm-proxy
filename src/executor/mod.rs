@@ -1,5 +1,5 @@
 use std::sync::Arc;
-
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -19,9 +19,35 @@ impl Executor {
     }
 
     pub fn run_health_check(&self) {
-        let pool = Pool::new(Arc::clone(&self.conn_injector));
-        let prog_args = crate::static_ref_args();
-        tokio::spawn(async move { prog_args.run_health_check(pool).await });
+        let mut pool = Pool::new(Arc::clone(&self.conn_injector));
+        tokio::spawn(async move {
+            loop {
+                let prog_args = crate::args();
+                for provider in prog_args.providers.iter() {
+                    let fut = async {
+                        let Ok(mut conn) = pool.get_outgoing_conn(&**provider).await else {
+                            provider.set_healthy(false);
+                            return;
+                        };
+                        if let Err(e) = provider.health_check(&mut conn).await {
+                            log::warn!(provider = provider.host(), error = e.to_string(); "health_check_error");
+                            provider.set_healthy(false);
+                        } else {
+                            provider.set_healthy(true);
+                        }
+                        pool.add(conn);
+                    };
+                    if tokio::time::timeout(Duration::from_secs(30), fut)
+                        .await
+                        .is_err()
+                    {
+                        log::warn!(provider = provider.host(); "health_check_timeout");
+                        provider.set_healthy(false);
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(prog_args.health_check_interval)).await;
+            }
+        });
     }
 
     pub async fn execute(&self, stream: TcpStream) {
