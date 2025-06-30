@@ -56,6 +56,7 @@ impl Executor {
         let mut tls_stream = match tls_acceptor.accept(stream).await {
             Ok(tls_stream) => tls_stream,
             Err(e) => {
+                #[cfg(debug_assertions)]
                 log::error!(error = e.to_string(); "tls_accept_error");
                 return;
             }
