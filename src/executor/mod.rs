@@ -71,6 +71,7 @@ impl Executor {
             tokio_rustls::TlsAcceptor::from(Arc::clone(&crate::args().tls_server_config));
         let mut tls_stream = match tls_acceptor.accept(stream).await {
             Ok(tls_stream) => tls_stream,
+            #[cfg_attr(not(debug_assertions), allow(unused))]
             Err(e) => {
                 #[cfg(debug_assertions)]
                 log::error!(error = e.to_string(); "tls_accept_error");
@@ -82,6 +83,7 @@ impl Executor {
         #[cfg(debug_assertions)]
         log::info!(alpn = alpn.map(|v| String::from_utf8_lossy(v)); "alpn_protocol");
         if matches!(alpn, Some(b"h2")) {
+            #[cfg_attr(not(debug_assertions), allow(unused))]
             if let Err(e) = pool.proxy_h2(&mut tls_stream).await {
                 #[cfg(debug_assertions)]
                 log::error!(alpn = "h2", error = e.to_string(); "proxy_h2_error");

@@ -96,6 +96,7 @@ fn run_background(executor: Arc<Executor>, enable_health_check: bool) {
                         executor.execute(stream).await;
                     });
                 }
+                #[cfg_attr(not(debug_assertions), allow(unused))]
                 Err(e) => {
                     #[cfg(debug_assertions)]
                     log::error!(error = e.to_string(); "tcp_accept_error")
