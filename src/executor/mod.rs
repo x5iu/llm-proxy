@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,12 +83,17 @@ impl Executor {
         log::info!(alpn = alpn.map(|v| String::from_utf8_lossy(v)); "alpn_protocol");
         if matches!(alpn, Some(b"h2")) {
             if let Err(e) = pool.proxy_h2(&mut tls_stream).await {
+                #[cfg(debug_assertions)]
                 log::error!(alpn = "h2", error = e.to_string(); "proxy_h2_error");
             }
         } else {
             match pool.proxy(&mut tls_stream).await {
                 Err(ProxyError::Abort(e)) => {
-                    log::error!(alpn = "http/1.1", error = e.to_string(); "proxy_abort_error");
+                    if cfg!(debug_assertions)
+                        || !matches!(&e, crate::Error::IO(io_error) if io_error.kind() == io::ErrorKind::BrokenPipe)
+                    {
+                        log::error!(alpn = "http/1.1", error = e.to_string(); "proxy_abort_error");
+                    }
                 }
                 #[cfg(debug_assertions)]
                 Err(ProxyError::Client(e)) => {
