@@ -3,8 +3,10 @@ pub mod executor;
 pub mod http;
 pub mod provider;
 
+use std::fmt::Formatter;
 use std::fs;
 use std::io;
+use std::ops::Deref;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -15,7 +17,8 @@ use rand::seq::IndexedRandom;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pki_types::pem::PemObject;
-
+use serde::de::SeqAccess;
+use serde::Deserializer;
 use structured_logger::json::new_writer;
 
 use provider::{new_provider, Provider};
@@ -47,12 +50,72 @@ struct ProviderConfig<'a> {
     port: Option<u16>,
     tls: Option<bool>,
     #[serde(skip_serializing)]
-    api_key: Option<&'a str>,
+    #[serde(borrow)]
+    api_key: Option<APIKeys<'a>>,
+    #[serde(skip_serializing)]
+    #[serde(borrow)]
+    api_keys: Option<Vec<&'a str>>,
     #[serde(skip_serializing)]
     #[serde(rename = "auth_keys")]
     provider_auth_keys: Option<Vec<String>>,
     #[serde(rename = "health_check")]
     health_check_config: Option<provider::HealthCheckConfig>,
+}
+
+struct APIKeys<'a>(Vec<&'a str>);
+
+impl<'a> APIKeys<'a> {
+    fn pop(&mut self) -> Option<&'a str> {
+        self.0.pop()
+    }
+
+    fn append(&mut self, others: Option<Vec<&'a str>>) {
+        if let Some(others) = others {
+            self.0.extend(others);
+        }
+    }
+}
+
+impl<'a> Deref for APIKeys<'a> {
+    type Target = [&'a str];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
+    }
+}
+
+impl<'de: 'a, 'a> serde::Deserialize<'de> for APIKeys<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = APIKeys<'de>;
+
+            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+                formatter.write_str("string or array of strings")
+            }
+
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(APIKeys(vec![v]))
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                serde::Deserialize::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(APIKeys)
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 pub fn load_config(
@@ -114,17 +177,39 @@ impl ProgArgs {
         let mut providers = Vec::new();
         config.providers.sort_by_key(|provider| provider.host);
         for mut provider in config.providers {
-            providers.push(new_provider(
-                provider.kind,
-                provider.host,
-                provider.endpoint,
-                provider.port,
-                provider.tls.unwrap_or(true),
-                provider.api_key,
-                Arc::clone(&auth_keys),
-                provider.provider_auth_keys,
-                provider.health_check_config.take(),
-            )?);
+            provider
+                .api_key
+                .as_mut()
+                .map(|v| v.append(provider.api_keys));
+            if let Some(api_keys @ [_, _, ..]) = provider.api_key.as_deref() {
+                debug_assert!(api_keys.len() > 1);
+                let health_check_config = provider.health_check_config.take();
+                for api_key in api_keys {
+                    providers.push(new_provider(
+                        provider.kind,
+                        provider.host,
+                        provider.endpoint,
+                        provider.port,
+                        provider.tls.unwrap_or(true),
+                        Some(api_key),
+                        Arc::clone(&auth_keys),
+                        provider.provider_auth_keys.clone(),
+                        health_check_config.clone(),
+                    )?);
+                }
+            } else {
+                providers.push(new_provider(
+                    provider.kind,
+                    provider.host,
+                    provider.endpoint,
+                    provider.port,
+                    provider.tls.unwrap_or(true),
+                    provider.api_key.map(|mut v| v.pop()).flatten(),
+                    Arc::clone(&auth_keys),
+                    provider.provider_auth_keys.clone(),
+                    provider.health_check_config.take(),
+                )?);
+            }
         }
         Ok(Self {
             tls_server_config: Arc::new(tls_server_config),

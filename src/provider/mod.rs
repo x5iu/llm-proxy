@@ -73,6 +73,7 @@ impl fmt::Display for Type {
 pub trait Provider: Send + Sync {
     fn kind(&self) -> Type;
     fn host(&self) -> &str;
+    fn api_key(&self) -> Option<&str>;
     fn endpoint(&self) -> &str;
     fn server_name(&self) -> rustls_pki_types::ServerName<'static>;
     fn sock_address(&self) -> &str;
@@ -105,7 +106,7 @@ pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
 
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct HealthCheckConfig {
     path: String,
     body: String,
@@ -118,6 +119,7 @@ pub struct AuthenticationError;
 
 pub struct OpenAIProvider {
     host: &'static str,
+    api_key: Option<String>,
     endpoint: &'static str,
     tls: bool,
     host_header: &'static str,
@@ -161,6 +163,7 @@ impl OpenAIProvider {
         let sock_address = format!("{}:{}", static_endpoint, port);
         Ok(Self {
             host: static_host,
+            api_key: api_key.map(ToString::to_string),
             endpoint: static_endpoint,
             tls,
             host_header,
@@ -195,6 +198,10 @@ impl Provider for OpenAIProvider {
 
     fn host(&self) -> &str {
         self.host
+    }
+
+    fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
     }
 
     fn endpoint(&self) -> &str {
@@ -379,6 +386,10 @@ impl Provider for GeminiProvider {
         self.host
     }
 
+    fn api_key(&self) -> Option<&str> {
+        Some(self.api_key.as_str())
+    }
+
     fn endpoint(&self) -> &str {
         self.endpoint
     }
@@ -494,6 +505,7 @@ impl Provider for GeminiProvider {
 
 pub struct AnthropicProvider {
     host: &'static str,
+    api_key: String,
     endpoint: &'static str,
     tls: bool,
     host_header: &'static str,
@@ -539,6 +551,7 @@ impl AnthropicProvider {
         let sock_address = format!("{}:{}", static_endpoint, port);
         Ok(Self {
             host: static_host,
+            api_key: api_key.to_string(),
             endpoint: static_endpoint,
             tls,
             host_header,
@@ -571,6 +584,10 @@ impl Provider for AnthropicProvider {
 
     fn host(&self) -> &str {
         self.host
+    }
+
+    fn api_key(&self) -> Option<&str> {
+        Some(self.api_key.as_str())
     }
 
     fn endpoint(&self) -> &str {

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -24,13 +25,27 @@ impl Executor {
             loop {
                 let prog_args = crate::args();
                 for provider in prog_args.providers.iter() {
+                    let provider_api_key = || {
+                        provider
+                            .api_key()
+                            .map(|k| {
+                                if let (Some(prefix), Some(suffix)) =
+                                    (k.get(..3), k.get(k.len() - 4..))
+                                {
+                                    Some(format!("{}...{}", prefix, suffix))
+                                } else {
+                                    None
+                                }
+                            })
+                            .flatten()
+                    };
                     let fut = async {
                         let Ok(mut conn) = pool.get_outgoing_conn(&**provider).await else {
                             provider.set_healthy(false);
                             return;
                         };
                         if let Err(e) = provider.health_check(&mut conn).await {
-                            log::warn!(provider = provider.host(), error = e.to_string(); "health_check_error");
+                            log::warn!(provider = provider.host(), api_key = provider_api_key(), error = e.to_string(); "health_check_error");
                             provider.set_healthy(false);
                         } else {
                             provider.set_healthy(true);
@@ -41,7 +56,7 @@ impl Executor {
                         .await
                         .is_err()
                     {
-                        log::warn!(provider = provider.host(); "health_check_timeout");
+                        log::warn!(provider = provider.host(), api_key = provider_api_key(); "health_check_timeout");
                         provider.set_healthy(false);
                     }
                 }
