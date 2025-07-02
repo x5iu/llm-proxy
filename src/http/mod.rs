@@ -127,8 +127,9 @@ pub(crate) struct Payload<'a> {
 
 macro_rules! select {
     ($host:expr => $provider:ident) => {
-        let prog_args = crate::args();
-        let Some($provider) = prog_args.select_provider($host) else {
+        let p = crate::program();
+        let p = p.read().await;
+        let Some($provider) = p.select_provider($host) else {
             return Err(Error::InvalidHeader);
         };
     };

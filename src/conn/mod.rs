@@ -79,12 +79,13 @@ impl Pool {
                 }
                 Err(e) => return Err(ProxyError::Client(e)),
             };
-            let prog_args = crate::args();
+            let p = crate::program();
             let Some(host) = request.host() else {
                 is_bad_request = true;
                 break;
             };
-            let Some(provider) = prog_args.select_provider(host) else {
+            let p = p.read().await;
+            let Some(provider) = p.select_provider(host) else {
                 is_bad_request = true;
                 break;
             };
@@ -160,11 +161,12 @@ impl Pool {
             let (mut request, mut respond) = next.map_err(|e| ProxyError::Client(e.into()))?;
             let mut pool = self.clone();
             tokio::spawn(async move {
-                let prog_args = crate::args();
+                let p = crate::program();
                 let Some(authority) = request.uri().authority() else {
                     return invalid!(respond, 400);
                 };
-                let Some(provider) = prog_args.select_provider(authority.host()) else {
+                let p = p.read().await;
+                let Some(provider) = p.select_provider(authority.host()) else {
                     return invalid!(respond, 400);
                 };
                 let mut auth_key = None;

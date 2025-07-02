@@ -24,8 +24,8 @@ impl Executor {
         let mut pool = Pool::new(Arc::clone(&self.conn_injector));
         tokio::spawn(async move {
             loop {
-                let prog_args = crate::args();
-                for provider in prog_args.providers.iter() {
+                let p = crate::program();
+                for provider in p.read().await.providers.iter() {
                     let provider_api_key = || {
                         provider
                             .api_key()
@@ -61,14 +61,15 @@ impl Executor {
                         provider.set_healthy(false);
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(prog_args.health_check_interval)).await;
+                tokio::time::sleep(Duration::from_secs(p.read().await.health_check_interval)).await;
             }
         });
     }
 
     pub async fn execute(&self, stream: TcpStream) {
+        let p = crate::program();
         let tls_acceptor =
-            tokio_rustls::TlsAcceptor::from(Arc::clone(&crate::args().tls_server_config));
+            tokio_rustls::TlsAcceptor::from(Arc::clone(&p.read().await.tls_server_config));
         let mut tls_stream = match tls_acceptor.accept(stream).await {
             Ok(tls_stream) => tls_stream,
             #[cfg_attr(not(debug_assertions), allow(unused))]
