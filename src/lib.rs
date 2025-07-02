@@ -75,10 +75,7 @@ impl Program {
         let mut providers = Vec::new();
         config.providers.sort_by_key(|provider| provider.host);
         for mut provider in config.providers {
-            provider
-                .api_key
-                .as_mut()
-                .map(|v| v.append(provider.api_keys));
+            provider.api_key.append(provider.api_keys);
             if let Some(api_keys @ [_, _, ..]) = provider.api_key.as_deref() {
                 debug_assert!(api_keys.len() > 1);
                 let health_check_config = provider.health_check_config.take();
@@ -102,7 +99,7 @@ impl Program {
                     provider.endpoint,
                     provider.port,
                     provider.tls.unwrap_or(true),
-                    provider.api_key.map(|mut v| v.pop()).flatten(),
+                    provider.api_key.pop(),
                     Arc::clone(&auth_keys),
                     provider.provider_auth_keys.clone(),
                     provider.health_check_config.take(),
@@ -184,16 +181,27 @@ struct ProviderConfig<'a> {
     health_check_config: Option<provider::HealthCheckConfig>,
 }
 
+trait APIKeysTrait<'a> {
+    fn pop(&mut self) -> Option<&'a str>;
+    fn append(&mut self, others: Option<Vec<&'a str>>);
+}
+
 struct APIKeys<'a>(Vec<&'a str>);
 
 impl<'a> APIKeys<'a> {
+    fn new() -> Self {
+        APIKeys(Vec::new())
+    }
+}
+
+impl<'a> APIKeysTrait<'a> for Option<APIKeys<'a>> {
     fn pop(&mut self) -> Option<&'a str> {
-        self.0.pop()
+        self.get_or_insert_with(APIKeys::new).0.pop()
     }
 
     fn append(&mut self, others: Option<Vec<&'a str>>) {
         if let Some(others) = others {
-            self.0.extend(others);
+            self.get_or_insert_with(APIKeys::new).0.extend(others);
         }
     }
 }
