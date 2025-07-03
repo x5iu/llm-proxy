@@ -1,4 +1,4 @@
-pub mod conn;
+pub mod worker;
 pub mod executor;
 pub mod http;
 pub mod provider;

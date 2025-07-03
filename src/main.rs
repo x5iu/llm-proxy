@@ -1,15 +1,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::net::TcpListener;
-
 use clap::{Parser, Subcommand};
-
 use signal_hook::consts::signal;
 use signal_hook::iterator::exfiltrator::SignalOnly;
 use signal_hook::iterator::SignalsInfo;
+use tokio::net::TcpListener;
 
-use llm_proxy::executor::Executor;
+use llm_proxy::executor::{Executor, Pool};
+use llm_proxy::worker::{Conn, Worker};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -51,7 +50,7 @@ async fn start(
 ) -> Result<(), Box<dyn std::error::Error>> {
     llm_proxy::load_config(&config, true).await?;
     log::info!(tls = true, debug = cfg!(debug_assertions); "start_llm_proxy");
-    run_background(Arc::new(Executor::new()), enable_health_check);
+    run_background(Arc::new(Executor::new(Pool::new())), enable_health_check);
     let mut signals =
         SignalsInfo::<SignalOnly>::new([signal::SIGTERM, signal::SIGINT, signal::SIGHUP])?;
     for signal in &mut signals {
@@ -65,9 +64,9 @@ async fn start(
     Ok(())
 }
 
-fn run_background(executor: Arc<Executor>, enable_health_check: bool) {
+fn run_background(executor: Arc<Executor<Pool<Conn>>>, enable_health_check: bool) {
     if enable_health_check {
-        executor.run_health_check();
+        executor.run_health_check::<Worker<Pool<Conn>>>();
     }
     tokio::spawn(async move {
         let listener = TcpListener::bind("0.0.0.0:443").await.unwrap();
@@ -76,7 +75,7 @@ fn run_background(executor: Arc<Executor>, enable_health_check: bool) {
                 Ok((stream, _)) => {
                     let executor = Arc::clone(&executor);
                     tokio::spawn(async move {
-                        executor.execute(stream).await;
+                        executor.execute::<Worker<Pool<Conn>>>(stream).await;
                     });
                 }
                 #[cfg_attr(not(debug_assertions), allow(unused))]
