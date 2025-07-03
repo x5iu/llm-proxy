@@ -114,5 +114,7 @@ impl Executor {
         }
         #[allow(unused)]
         tls_stream.flush().await;
+        #[allow(unused)]
+        tls_stream.shutdown().await;
     }
 }

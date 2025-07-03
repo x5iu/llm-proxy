@@ -351,6 +351,8 @@ impl Pool {
                 }
             } else if conn.health_check().await.is_ok() {
                 return Some(conn);
+            } else {
+                conn.shutdown().await;
             }
             retry_times += 1;
         }
@@ -405,6 +407,19 @@ impl Conn {
             )));
         }
         Ok(())
+    }
+
+    async fn shutdown(&mut self) {
+        match &mut self.stream {
+            Stream::Tcp(stream) => {
+                #[allow(unused)]
+                stream.shutdown().await;
+            }
+            Stream::Tls(stream) => {
+                #[allow(unused)]
+                stream.shutdown().await;
+            }
+        }
     }
 }
 
