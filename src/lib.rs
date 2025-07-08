@@ -1,7 +1,7 @@
-pub mod worker;
 pub mod executor;
 pub mod http;
 pub mod provider;
+pub mod worker;
 
 use std::fmt::Formatter;
 use std::fs;
@@ -10,7 +10,8 @@ use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, Once};
 
-use rand::seq::IndexedRandom;
+use rand::distr::weighted::WeightedIndex;
+use rand::{rng, Rng};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pki_types::pem::PemObject;
 use serde::de::SeqAccess;
@@ -86,6 +87,7 @@ impl Program {
                         provider.endpoint,
                         provider.port,
                         provider.tls.unwrap_or(true),
+                        provider.weight.unwrap_or(1.0),
                         Some(api_key),
                         Arc::clone(&auth_keys),
                         provider.provider_auth_keys.clone(),
@@ -99,6 +101,7 @@ impl Program {
                     provider.endpoint,
                     provider.port,
                     provider.tls.unwrap_or(true),
+                    provider.weight.unwrap_or(1.0),
                     provider.api_key.pop(),
                     Arc::clone(&auth_keys),
                     provider.provider_auth_keys.clone(),
@@ -114,37 +117,23 @@ impl Program {
     }
 
     pub fn select_provider(&self, host: &str) -> Option<&dyn Provider> {
-        let Some(start) = self.providers.iter().enumerate().find_map(|(i, provider)| {
-            if provider.host() == host {
-                Some(i)
-            } else {
-                None
-            }
-        }) else {
-            return None;
-        };
-        let Some(end) = self
+        let healthy_providers: Vec<&dyn Provider> = self
             .providers
             .iter()
-            .rev()
-            .enumerate()
-            .map(|(i, provider)| (self.providers.len() - i - 1, provider))
-            .find_map(|(i, provider)| {
-                if provider.is_healthy() && provider.host() == host {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-        else {
-            return None;
-        };
-        if start == end {
-            return Some(&*self.providers[start]);
-        }
-        self.providers[start..=end]
-            .choose(&mut rand::rng())
+            .filter(|provider| provider.host() == host && provider.is_healthy())
             .map(|provider| &**provider)
+            .collect();
+
+        match healthy_providers.len() {
+            0 => None,
+            1 => Some(healthy_providers[0]),
+            _ => {
+                let dist = WeightedIndex::new(healthy_providers.iter().map(|p| p.weight()))
+                    .expect("Failed to create WeightedIndex: invalid weights detected");
+                let selected_idx = rng().sample(&dist);
+                Some(healthy_providers[selected_idx])
+            }
+        }
     }
 }
 
@@ -168,6 +157,7 @@ struct ProviderConfig<'a> {
     endpoint: &'a str,
     port: Option<u16>,
     tls: Option<bool>,
+    weight: Option<f64>,
     #[serde(skip_serializing)]
     #[serde(borrow)]
     api_key: Option<APIKeys<'a>>,

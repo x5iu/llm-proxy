@@ -14,6 +14,7 @@ pub fn new_provider(
     endpoint: &str,
     port: Option<u16>,
     tls: bool,
+    weight: f64,
     api_key: Option<&str>,
     auth_keys: Arc<Vec<String>>,
     provider_auth_keys: Option<Vec<String>>,
@@ -25,6 +26,7 @@ pub fn new_provider(
             endpoint,
             port,
             tls,
+            weight,
             api_key,
             auth_keys,
             provider_auth_keys,
@@ -35,6 +37,7 @@ pub fn new_provider(
             endpoint,
             port,
             tls,
+            weight,
             api_key,
             auth_keys,
             provider_auth_keys,
@@ -45,6 +48,7 @@ pub fn new_provider(
             endpoint,
             port,
             tls,
+            weight,
             api_key,
             auth_keys,
             provider_auth_keys,
@@ -85,6 +89,7 @@ pub trait Provider: Send + Sync {
     fn authenticate(&self, auth: Option<&[u8]>) -> Result<(), AuthenticationError>;
     fn authenticate_key(&self, key: &str) -> Result<(), AuthenticationError>;
     fn rewrite_first_header_block(&self, block: &[u8]) -> Option<Vec<u8>>;
+    fn weight(&self) -> f64;
 
     fn tls(&self) -> bool {
         true
@@ -122,6 +127,7 @@ pub struct OpenAIProvider {
     api_key: Option<String>,
     endpoint: &'static str,
     tls: bool,
+    weight: f64,
     host_header: &'static str,
     auth_header: Option<&'static str>,
     sock_address: String,
@@ -138,6 +144,7 @@ impl OpenAIProvider {
         endpoint: &str,
         port: Option<u16>,
         tls: bool,
+        weight: f64,
         api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
@@ -166,6 +173,7 @@ impl OpenAIProvider {
             api_key: api_key.map(ToString::to_string),
             endpoint: static_endpoint,
             tls,
+            weight,
             host_header,
             auth_header,
             sock_address,
@@ -234,6 +242,10 @@ impl Provider for OpenAIProvider {
 
     fn has_auth_keys(&self) -> bool {
         self.auth_keys.len() > 0 || self.provider_auth_keys.is_some()
+    }
+
+    fn weight(&self) -> f64 {
+        self.weight
     }
 
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
@@ -307,6 +319,7 @@ pub struct GeminiProvider {
     host: &'static str,
     endpoint: &'static str,
     tls: bool,
+    weight: f64,
     api_key: String,
     host_header: &'static str,
     auth_header: &'static str,
@@ -324,6 +337,7 @@ impl GeminiProvider {
         endpoint: &str,
         port: Option<u16>,
         tls: bool,
+        weight: f64,
         api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
@@ -353,6 +367,7 @@ impl GeminiProvider {
             host: static_host,
             endpoint: static_endpoint,
             tls,
+            weight,
             api_key: api_key.to_string(),
             host_header,
             auth_header,
@@ -420,6 +435,10 @@ impl Provider for GeminiProvider {
 
     fn has_auth_keys(&self) -> bool {
         self.auth_keys.len() > 0 || self.provider_auth_keys.is_some()
+    }
+
+    fn weight(&self) -> f64 {
+        self.weight
     }
 
     fn authenticate(&self, key: Option<&[u8]>) -> Result<(), AuthenticationError> {
@@ -508,6 +527,7 @@ pub struct AnthropicProvider {
     api_key: String,
     endpoint: &'static str,
     tls: bool,
+    weight: f64,
     host_header: &'static str,
     auth_header: &'static str,
     sock_address: String,
@@ -524,6 +544,7 @@ impl AnthropicProvider {
         endpoint: &str,
         port: Option<u16>,
         tls: bool,
+        weight: f64,
         api_key: Option<&str>,
         auth_keys: Arc<Vec<String>>,
         provider_auth_keys: Option<Vec<String>>,
@@ -554,6 +575,7 @@ impl AnthropicProvider {
             api_key: api_key.to_string(),
             endpoint: static_endpoint,
             tls,
+            weight,
             host_header,
             auth_header,
             sock_address,
@@ -620,6 +642,10 @@ impl Provider for AnthropicProvider {
 
     fn has_auth_keys(&self) -> bool {
         self.auth_keys.len() > 0 || self.provider_auth_keys.is_some()
+    }
+
+    fn weight(&self) -> f64 {
+        self.weight
     }
 
     fn authenticate(&self, header: Option<&[u8]>) -> Result<(), AuthenticationError> {
