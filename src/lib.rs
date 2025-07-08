@@ -76,33 +76,40 @@ impl Program {
         let mut providers = Vec::new();
         config.providers.sort_by_key(|provider| provider.host);
         for mut provider in config.providers {
-            provider.api_key.append(provider.api_keys);
-            if let Some(api_keys @ [_, _, ..]) = provider.api_key.as_deref() {
-                debug_assert!(api_keys.len() > 1);
+            let mut api_keys = provider.api_keys;
+            api_keys.append(provider.api_key);
+            if let Some(api_key_configs @ [_, _, ..]) = api_keys.as_deref() {
+                debug_assert!(api_key_configs.len() > 1);
                 let health_check_config = provider.health_check_config.take();
-                for api_key in api_keys {
+                for api_key_config in api_key_configs {
                     providers.push(new_provider(
                         provider.kind,
                         provider.host,
                         provider.endpoint,
                         provider.port,
                         provider.tls.unwrap_or(true),
-                        provider.weight.unwrap_or(1.0),
-                        Some(api_key),
+                        api_key_config
+                            .weight
+                            .unwrap_or(provider.weight.unwrap_or(1.0)),
+                        Some(api_key_config.key),
                         Arc::clone(&auth_keys),
                         provider.provider_auth_keys.clone(),
                         health_check_config.clone(),
                     )?);
                 }
             } else {
+                let api_key_config = api_keys.pop();
                 providers.push(new_provider(
                     provider.kind,
                     provider.host,
                     provider.endpoint,
                     provider.port,
                     provider.tls.unwrap_or(true),
-                    provider.weight.unwrap_or(1.0),
-                    provider.api_key.pop(),
+                    api_key_config
+                        .as_ref()
+                        .and_then(|cfg| cfg.weight)
+                        .unwrap_or(provider.weight.unwrap_or(1.0)),
+                    api_key_config.as_ref().map(|cfg| cfg.key),
                     Arc::clone(&auth_keys),
                     provider.provider_auth_keys.clone(),
                     provider.health_check_config.take(),
@@ -163,7 +170,7 @@ struct ProviderConfig<'a> {
     api_key: Option<APIKeys<'a>>,
     #[serde(skip_serializing)]
     #[serde(borrow)]
-    api_keys: Option<Vec<&'a str>>,
+    api_keys: Option<Vec<APIKeyConfig<'a>>>,
     #[serde(skip_serializing)]
     #[serde(rename = "auth_keys")]
     provider_auth_keys: Option<Vec<String>>,
@@ -172,29 +179,36 @@ struct ProviderConfig<'a> {
 }
 
 trait APIKeysTrait<'a> {
-    fn pop(&mut self) -> Option<&'a str>;
-    fn append(&mut self, others: Option<Vec<&'a str>>);
+    type Item;
+    fn pop(&mut self) -> Option<Self::Item>;
+    fn append(&mut self, others: Option<APIKeys<'a>>);
 }
 
-struct APIKeys<'a>(Vec<&'a str>);
-
-impl<'a> APIKeys<'a> {
-    fn new() -> Self {
-        APIKeys(Vec::new())
-    }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct APIKeyConfig<'a> {
+    #[serde(skip_serializing)]
+    key: &'a str,
+    weight: Option<f64>,
 }
 
-impl<'a> APIKeysTrait<'a> for Option<APIKeys<'a>> {
-    fn pop(&mut self) -> Option<&'a str> {
-        self.get_or_insert_with(APIKeys::new).0.pop()
+impl<'a> APIKeysTrait<'a> for Option<Vec<APIKeyConfig<'a>>> {
+    type Item = APIKeyConfig<'a>;
+
+    fn pop(&mut self) -> Option<APIKeyConfig<'a>> {
+        self.get_or_insert_with(Vec::new).pop()
     }
 
-    fn append(&mut self, others: Option<Vec<&'a str>>) {
-        if let Some(others) = others {
-            self.get_or_insert_with(APIKeys::new).0.extend(others);
+    fn append(&mut self, others: Option<APIKeys<'a>>) {
+        if let Some(APIKeys(others)) = others {
+            for key in others {
+                self.get_or_insert_with(Vec::new)
+                    .push(APIKeyConfig { key, weight: None });
+            }
         }
     }
 }
+
+struct APIKeys<'a>(Vec<&'a str>);
 
 impl<'a> Deref for APIKeys<'a> {
     type Target = [&'a str];
