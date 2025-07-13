@@ -55,9 +55,14 @@ impl<P: PoolTrait> Executor<P> {
                             return;
                         };
                         if let Err(e) = provider.health_check(&mut conn).await {
-                            log::warn!(provider = provider.host(), api_key = provider_api_key(), error = e.to_string(); "health_check_error");
+                            if provider.is_healthy() {
+                                log::warn!(provider = provider.host(), api_key = provider_api_key(), error = e.to_string(); "health_check_error");
+                            }
                             provider.set_healthy(false);
                         } else {
+                            if !provider.is_healthy() {
+                                log::info!(provider = provider.host(), api_key = provider_api_key(); "provider_re_enable");
+                            }
                             provider.set_healthy(true);
                         }
                         worker.add(provider.endpoint(), conn).await;
