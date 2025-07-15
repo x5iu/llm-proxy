@@ -113,6 +113,7 @@ impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sy
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct HealthCheckConfig {
+    method: Option<String>,
     path: String,
     body: String,
     headers: Option<Vec<String>>,
@@ -302,6 +303,7 @@ impl Provider for OpenAIProvider {
             Box::pin(health_check(
                 stream,
                 self.endpoint().as_bytes(),
+                cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"POST"),
                 cfg.path.as_bytes(),
                 self.auth_header().map(|v| v.as_bytes()),
                 cfg.headers
@@ -507,6 +509,7 @@ impl Provider for GeminiProvider {
                 health_check(
                     stream,
                     self.endpoint().as_bytes(),
+                    cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"POST"),
                     path.as_bytes(),
                     None,
                     cfg.headers
@@ -702,6 +705,7 @@ impl Provider for AnthropicProvider {
             Box::pin(health_check(
                 stream,
                 self.endpoint().as_bytes(),
+                cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"POST"),
                 cfg.path.as_bytes(),
                 self.auth_header().map(|v| v.as_bytes()),
                 cfg.headers
@@ -718,12 +722,14 @@ impl Provider for AnthropicProvider {
 async fn health_check(
     stream: &mut dyn AsyncReadWrite,
     endpoint: &[u8],
+    method: &[u8],
     path: &[u8],
     authorization: Option<&[u8]>,
     headers: Option<impl Iterator<Item=&[u8]>>,
     req: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    stream.write_all(b"POST ").await?;
+    stream.write_all(method).await?;
+    stream.write_all(b" ").await?;
     stream.write_all(path).await?;
     stream.write_all(b" HTTP/1.1\r\n").await?;
     stream.write_all(b"Host: ").await?;
