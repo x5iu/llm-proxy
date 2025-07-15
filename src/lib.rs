@@ -65,6 +65,13 @@ pub struct Program {
 
 impl Program {
     fn from_config(mut config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+        // Check if certificate and private key files exist
+        if !Path::new(config.cert_file).exists() {
+            return Err(format!("Certificate file not found: {}", config.cert_file).into());
+        }
+        if !Path::new(config.private_key_file).exists() {
+            return Err(format!("Private key file not found: {}", config.private_key_file).into());
+        }
         let certs =
             CertificateDer::pem_file_iter(config.cert_file)?.collect::<Result<Vec<_>, _>>()?;
         let private_key = PrivateKeyDer::from_pem_file(config.private_key_file)?;

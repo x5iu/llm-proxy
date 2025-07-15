@@ -115,7 +115,7 @@ impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send + Sy
 pub struct HealthCheckConfig {
     method: Option<String>,
     path: String,
-    body: String,
+    body: Option<String>,
     headers: Option<Vec<String>>,
 }
 
@@ -303,13 +303,13 @@ impl Provider for OpenAIProvider {
             Box::pin(health_check(
                 stream,
                 self.endpoint().as_bytes(),
-                cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"POST"),
+                cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"GET"),
                 cfg.path.as_bytes(),
                 self.auth_header().map(|v| v.as_bytes()),
                 cfg.headers
                     .as_deref()
                     .map(|v| v.iter().map(|x| x.trim().as_bytes())),
-                cfg.body.as_bytes(),
+                cfg.body.as_ref().map(|v| v.as_bytes()).unwrap_or_default(),
             ))
         } else {
             Box::pin(async { Ok(()) })
@@ -509,13 +509,13 @@ impl Provider for GeminiProvider {
                 health_check(
                     stream,
                     self.endpoint().as_bytes(),
-                    cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"POST"),
+                    cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"GET"),
                     path.as_bytes(),
                     None,
                     cfg.headers
                         .as_deref()
                         .map(|v| v.iter().map(|x| x.trim().as_bytes())),
-                    cfg.body.as_bytes(),
+                    cfg.body.as_ref().map(|v| v.as_bytes()).unwrap_or_default(),
                 )
                     .await
             })
@@ -705,13 +705,13 @@ impl Provider for AnthropicProvider {
             Box::pin(health_check(
                 stream,
                 self.endpoint().as_bytes(),
-                cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"POST"),
+                cfg.method.as_ref().map(|v| v.as_bytes()).unwrap_or(b"GET"),
                 cfg.path.as_bytes(),
                 self.auth_header().map(|v| v.as_bytes()),
                 cfg.headers
                     .as_deref()
                     .map(|v| v.iter().map(|x| x.trim().as_bytes())),
-                cfg.body.as_bytes(),
+                cfg.body.as_ref().map(|v| v.as_bytes()).unwrap_or_default(),
             ))
         } else {
             Box::pin(async move { Ok(()) })
@@ -736,9 +736,6 @@ async fn health_check(
     stream.write_all(endpoint).await?;
     stream.write_all(b"\r\n").await?;
     stream.write_all(b"Connection: keep-alive\r\n").await?;
-    stream
-        .write_all(b"Content-Type: application/json\r\n")
-        .await?;
     stream.write_all(b"Content-Length: ").await?;
     stream.write_all(req.len().to_string().as_bytes()).await?;
     stream.write_all(b"\r\n").await?;
