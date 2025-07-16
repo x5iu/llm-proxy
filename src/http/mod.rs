@@ -216,36 +216,38 @@ impl<'a> Payload<'a> {
                 .map(|range| &block[range.start..range.end]),
         ) {
             select!(host => provider);
-            // Due to the particularity of Gemini (aka googleapis), we will first match the
-            // corresponding Authorization information from the Headers. If there is no
-            // Authorization information in the Headers, we will then try to match the key
-            // information from the Query.
-            if let Some(auth_header_key) = provider.auth_header_key() {
-                let header_lines = HeaderLines::new(&crlfs, header);
-                for line in header_lines.skip(1) {
-                    let Ok(header) = std::str::from_utf8(line) else {
-                        return Err(Error::InvalidHeader);
-                    };
-                    if is_header(header, auth_header_key) {
-                        let start = {
-                            let block_start = &block[0] as *const u8 as usize;
-                            let auth_start = &line[0] as *const u8 as usize;
-                            auth_start - block_start
+            if provider.has_auth_keys() {
+                // Due to the particularity of Gemini (aka googleapis), we will first match the
+                // corresponding Authorization information from the Headers. If there is no
+                // Authorization information in the Headers, we will then try to match the key
+                // information from the Query.
+                if let Some(auth_header_key) = provider.auth_header_key() {
+                    let header_lines = HeaderLines::new(&crlfs, header);
+                    for line in header_lines.skip(1) {
+                        let Ok(header) = std::str::from_utf8(line) else {
+                            return Err(Error::InvalidHeader);
                         };
-                        header_chunks[1] = Some(start..start + line.len());
-                        auth_range = Some(start..start + line.len());
+                        if is_header(header, auth_header_key) {
+                            let start = {
+                                let block_start = &block[0] as *const u8 as usize;
+                                let auth_start = &line[0] as *const u8 as usize;
+                                auth_start - block_start
+                            };
+                            header_chunks[1] = Some(start..start + line.len());
+                            auth_range = Some(start..start + line.len());
+                        }
                     }
                 }
-            }
-            if auth_range.is_none() {
-                if let Some(auth_query_key) = provider.auth_query_key() {
-                    let Some(request_line) = HeaderLines::new(&crlfs, header).next() else {
-                        return Err(Error::InvalidHeader);
-                    };
-                    let Ok(request_line_str) = std::str::from_utf8(request_line) else {
-                        return Err(Error::InvalidHeader);
-                    };
-                    auth_range = get_auth_query_range(request_line_str, auth_query_key);
+                if auth_range.is_none() {
+                    if let Some(auth_query_key) = provider.auth_query_key() {
+                        let Some(request_line) = HeaderLines::new(&crlfs, header).next() else {
+                            return Err(Error::InvalidHeader);
+                        };
+                        let Ok(request_line_str) = std::str::from_utf8(request_line) else {
+                            return Err(Error::InvalidHeader);
+                        };
+                        auth_range = get_auth_query_range(request_line_str, auth_query_key);
+                    }
                 }
             }
         };

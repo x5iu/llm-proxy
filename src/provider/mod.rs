@@ -238,7 +238,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn auth_header_key(&self) -> Option<&'static str> {
-        self.auth_header().and(Some(http::HEADER_AUTHORIZATION))
+        Some(http::HEADER_AUTHORIZATION)
     }
 
     fn has_auth_keys(&self) -> bool {
