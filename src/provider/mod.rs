@@ -487,25 +487,18 @@ impl Provider for GeminiProvider {
         let Ok(block_str) = std::str::from_utf8(block) else {
             return None;
         };
-        let (_, prefix) = http::split_host_path(self.host());
-        let query_range = if let Some(prefix) = prefix {
-            let block_cow_str = replace_path(prefix, block_str);
-            let Some(query_range) = http::get_auth_query_range(&block_cow_str, http::QUERY_KEY_KEY)
-            else {
-                return None;
-            };
-            query_range
-        } else {
-            let Some(query_range) = http::get_auth_query_range(block_str, http::QUERY_KEY_KEY)
-            else {
-                return None;
-            };
-            query_range
+        let mut block_cow_str = Cow::Borrowed(block_str);
+        if let (_, Some(prefix)) = http::split_host_path(self.host()) {
+            block_cow_str = replace_path(prefix, block_str);
+        }
+        let Some(query_range) = http::get_auth_query_range(&block_cow_str, http::QUERY_KEY_KEY)
+        else {
+            return None;
         };
-        let mut rewritten = Vec::with_capacity(block.len());
-        rewritten.extend_from_slice(&block[..query_range.start]);
+        let mut rewritten = Vec::with_capacity(block_cow_str.len());
+        rewritten.extend_from_slice(block_cow_str[..query_range.start].as_bytes());
         rewritten.extend_from_slice(self.api_key.as_bytes());
-        rewritten.extend_from_slice(&block[query_range.end..]);
+        rewritten.extend_from_slice(block_cow_str[query_range.end..].as_bytes());
         Some(rewritten)
     }
 
