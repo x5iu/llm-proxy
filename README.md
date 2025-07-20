@@ -77,9 +77,6 @@ providers:
     health_check:
       method: "GET"
       path: "/v1/models"
-      body: "{}"
-      headers:
-        - "Content-Type: application/json"
 
   # Gemini Configuration
   - type: "gemini"
@@ -92,7 +89,6 @@ providers:
     health_check:
       method: "GET"
       path: "/v1beta/models"
-      body: "{}"
 
   # Anthropic Configuration
   - type: "anthropic"
