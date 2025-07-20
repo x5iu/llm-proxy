@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -88,8 +89,22 @@ pub trait Provider: Send + Sync {
     fn has_auth_keys(&self) -> bool;
     fn authenticate(&self, auth: Option<&[u8]>) -> Result<(), AuthenticationError>;
     fn authenticate_key(&self, key: &str) -> Result<(), AuthenticationError>;
-    fn rewrite_first_header_block(&self, block: &[u8]) -> Option<Vec<u8>>;
     fn weight(&self) -> f64;
+
+    fn rewrite_first_header_block(&self, block: &[u8]) -> Option<Vec<u8>> {
+        let Ok(block_str) = std::str::from_utf8(block) else {
+            return None;
+        };
+        if let (_, Some(prefix)) = http::split_host_path(self.host()) {
+            let block_cow_str = replace_path(prefix, block_str);
+            Some(match block_cow_str {
+                Cow::Borrowed(s) => s.to_string().into_bytes(),
+                Cow::Owned(s) => s.into_bytes(),
+            })
+        } else {
+            None
+        }
+    }
 
     fn tls(&self) -> bool {
         true
@@ -276,10 +291,6 @@ impl Provider for OpenAIProvider {
             .find(|&k| k == key.trim_start_matches("Bearer ").trim())
             .map(|_| ())
             .ok_or(AuthenticationError)
-    }
-
-    fn rewrite_first_header_block(&self, _: &[u8]) -> Option<Vec<u8>> {
-        None
     }
 
     fn tls(&self) -> bool {
@@ -476,8 +487,20 @@ impl Provider for GeminiProvider {
         let Ok(block_str) = std::str::from_utf8(block) else {
             return None;
         };
-        let Some(query_range) = http::get_auth_query_range(block_str, http::QUERY_KEY_KEY) else {
-            return None;
+        let (_, prefix) = http::split_host_path(self.host());
+        let query_range = if let Some(prefix) = prefix {
+            let block_cow_str = replace_path(prefix, block_str);
+            let Some(query_range) = http::get_auth_query_range(&block_cow_str, http::QUERY_KEY_KEY)
+            else {
+                return None;
+            };
+            query_range
+        } else {
+            let Some(query_range) = http::get_auth_query_range(block_str, http::QUERY_KEY_KEY)
+            else {
+                return None;
+            };
+            query_range
         };
         let mut rewritten = Vec::with_capacity(block.len());
         rewritten.extend_from_slice(&block[..query_range.start]);
@@ -680,10 +703,6 @@ impl Provider for AnthropicProvider {
             .ok_or(AuthenticationError)
     }
 
-    fn rewrite_first_header_block(&self, _: &[u8]) -> Option<Vec<u8>> {
-        None
-    }
-
     fn tls(&self) -> bool {
         self.tls
     }
@@ -716,6 +735,77 @@ impl Provider for AnthropicProvider {
         } else {
             Box::pin(async move { Ok(()) })
         }
+    }
+}
+
+fn replace_path<'a>(prefix: &str, block_str: &'a str) -> Cow<'a, str> {
+    let path_range = http::get_req_path(block_str);
+    let path = if path_range.start == path_range.end {
+        "/"
+    } else {
+        &block_str[path_range.start..path_range.end]
+    };
+
+    let modified_path = if path.starts_with(prefix) {
+        let remaining = &path[prefix.len()..];
+        if remaining.is_empty() {
+            "/"
+        } else {
+            remaining
+        }
+    } else {
+        return Cow::Borrowed(block_str);
+    };
+
+    // Build the result string
+    let mut result = String::with_capacity(block_str.len());
+    result.push_str(&block_str[..path_range.start]);
+    result.push_str(modified_path);
+    result.push_str(&block_str[path_range.end..]);
+    Cow::Owned(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_path() {
+        // Test basic prefix removal
+        assert_eq!(
+            replace_path("/v1", "GET /v1/completions HTTP/1.1"),
+            "GET /completions HTTP/1.1"
+        );
+
+        // Test prefix removal with exact match
+        assert_eq!(replace_path("/v1", "GET /v1 HTTP/1.1"), "GET / HTTP/1.1");
+
+        // Test no prefix match
+        assert_eq!(
+            replace_path("/v1", "GET /api/users HTTP/1.1"),
+            "GET /api/users HTTP/1.1"
+        );
+
+        // Test complex path with query parameters
+        assert_eq!(
+            replace_path("/v1", "GET /v1/completions?key=value HTTP/1.1"),
+            "GET /completions?key=value HTTP/1.1"
+        );
+
+        // Test root path
+        assert_eq!(replace_path("/", "GET / HTTP/1.1"), "GET / HTTP/1.1");
+
+        // Test POST request
+        assert_eq!(
+            replace_path("/v1", "POST /v1/chat/completions HTTP/1.1"),
+            "POST /chat/completions HTTP/1.1"
+        );
+
+        // Test with fragment
+        assert_eq!(
+            replace_path("/v1", "GET /v1/models#fragment HTTP/1.1"),
+            "GET /models#fragment HTTP/1.1"
+        );
     }
 }
 

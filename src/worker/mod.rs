@@ -131,7 +131,7 @@ where
                     break;
                 };
                 let p = p.read().await;
-                let Some(provider) = p.select_provider(host) else {
+                let Some(provider) = p.select_provider(host, request.path()) else {
                     is_bad_request = true;
                     break;
                 };
@@ -220,7 +220,7 @@ where
                         return invalid!(respond, 400);
                     };
                     let p = p.read().await;
-                    let Some(provider) = p.select_provider(authority.host()) else {
+                    let Some(provider) = p.select_provider(authority.host(), request.uri().path()) else {
                         return invalid!(respond, 400);
                     };
                     if provider.has_auth_keys() {
@@ -251,6 +251,7 @@ where
                             return invalid!(respond, 401);
                         }
                     }
+                    let host = authority.host().to_string();
                     request
                         .headers_mut()
                         .entry("Connection")
@@ -258,7 +259,7 @@ where
                     request
                         .headers_mut()
                         .entry("Host")
-                        .or_insert(httplib::HeaderValue::from_str(provider.host()).unwrap());
+                        .or_insert(httplib::HeaderValue::from_str(&host).unwrap());
                     let mut req_headers = String::with_capacity(1024);
                     for (key, value) in request.headers() {
                         req_headers.push_str(key.as_str());

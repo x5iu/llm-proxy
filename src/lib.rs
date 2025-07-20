@@ -130,12 +130,27 @@ impl Program {
         })
     }
 
-    pub fn select_provider(&self, host: &str) -> Option<&dyn Provider> {
+    pub fn select_provider(&self, host: &str, path: &str) -> Option<&dyn Provider> {
         let healthy_providers: Vec<&dyn Provider> = self
             .providers
             .iter()
-            .filter(|provider| provider.host() == host && provider.is_healthy())
-            .map(|provider| &**provider)
+            .filter_map(|provider| {
+                if !provider.is_healthy() {
+                    return None;
+                }
+                let (provider_host, provider_path_prefix) = http::split_host_path(provider.host());
+                let selected = if let Some(provider_path_prefix) = provider_path_prefix {
+                    provider_host == host
+                        && path.starts_with(provider_path_prefix)
+                        && matches!(
+                            path.as_bytes().get(provider_path_prefix.len()),
+                            None | Some(b'/')
+                        )
+                } else {
+                    provider_host == host
+                };
+                selected.then(|| &**provider)
+            })
             .collect();
 
         match healthy_providers.len() {

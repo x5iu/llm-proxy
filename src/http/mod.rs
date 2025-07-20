@@ -66,6 +66,10 @@ impl<'a> Request<'a> {
         Ok(())
     }
 
+    pub fn path(&self) -> &str {
+        self.payload.path()
+    }
+
     pub fn host(&self) -> Option<&str> {
         self.payload.host()
     }
@@ -116,6 +120,7 @@ pub(crate) struct Payload<'a> {
     internal_buffer: Box<[u8]>,
     first_block_length: usize,
     header_length: usize,
+    path_range: Range<usize>,
     host_range: Option<Range<usize>>,
     auth_range: Option<Range<usize>>,
     pub(crate) body: Body<'a>,
@@ -125,11 +130,11 @@ pub(crate) struct Payload<'a> {
     pub(crate) conn_keep_alive: bool,
 }
 
-macro_rules! select {
-    ($host:expr => $provider:ident) => {
+macro_rules! select_provider {
+    (($host:expr, $path:expr) => $provider:ident) => {
         let p = crate::program();
         let p = p.read().await;
-        let Some($provider) = p.select_provider($host) else {
+        let Some($provider) = p.select_provider($host, $path) else {
             return Err(Error::InvalidHeader);
         };
     };
@@ -170,14 +175,17 @@ impl<'a> Payload<'a> {
         };
         let first_block = &block[..advanced];
         let header = &block[..first_double_crlf_index + CRLF.len()];
-        let header_lines = HeaderLines::new(&crlfs, header);
+        let mut header_lines = HeaderLines::new(&crlfs, header);
         let mut content_length: Option<usize> = None;
         let mut transfer_encoding_chunked = false;
         let mut host_range: Option<Range<usize>> = None;
         let mut auth_range: Option<Range<usize>> = None;
         let mut header_chunks: [Option<Range<usize>>; 4] = [None, None, None, None];
         let mut conn_keep_alive = false;
-        for line in header_lines.skip(1) {
+        let Some(req_line) = header_lines.next() else {
+            return Err(Error::InvalidHeader);
+        };
+        for line in header_lines {
             let Ok(header) = std::str::from_utf8(line) else {
                 return Err(Error::InvalidHeader);
             };
@@ -210,12 +218,17 @@ impl<'a> Payload<'a> {
                 }
             }
         }
+        let Ok(req_line_str) = std::str::from_utf8(req_line) else {
+            return Err(Error::InvalidHeader);
+        };
+        let path_range = get_req_path(req_line_str);
+        let path = &req_line_str[path_range.start..path_range.end];
         if let Some(host) = get_host(
             host_range
                 .as_ref()
                 .map(|range| &block[range.start..range.end]),
         ) {
-            select!(host => provider);
+            select_provider!((host, path) => provider);
             if provider.has_auth_keys() {
                 // Due to the particularity of Gemini (aka googleapis), we will first match the
                 // corresponding Authorization information from the Headers. If there is no
@@ -292,6 +305,7 @@ impl<'a> Payload<'a> {
             internal_buffer: block,
             first_block_length,
             header_length,
+            path_range,
             host_range,
             auth_range,
             body,
@@ -300,6 +314,18 @@ impl<'a> Payload<'a> {
             header_current_chunk: 0,
             conn_keep_alive,
         })
+    }
+
+    fn path(&self) -> &str {
+        if self.path_range.start == self.path_range.end {
+            "/"
+        } else {
+            unsafe {
+                std::str::from_utf8_unchecked(
+                    &self.internal_buffer[self.path_range.start..self.path_range.end],
+                )
+            }
+        }
     }
 
     fn host(&self) -> Option<&str> {
@@ -341,7 +367,7 @@ impl<'a> Payload<'a> {
                         log::info!(step = "ReadState::Start"; "current_block:header_chunks({})", cur_idx);
                         if cur_idx == 0 {
                             if self.host_range.is_some() {
-                                select!(self.host().unwrap() => provider);
+                                select_provider!((self.host().unwrap(), self.path()) => provider);
                                 if let Some(rewritten) = provider.rewrite_first_header_block(
                                     &self.internal_buffer[range.start..range.end],
                                 ) {
@@ -362,7 +388,7 @@ impl<'a> Payload<'a> {
                 if self.host_range.is_some() {
                     #[cfg(debug_assertions)]
                     log::info!(step = "ReadState::HostHeader"; "current_block:host_header");
-                    select!(self.host().unwrap() => provider);
+                    select_provider!((self.host().unwrap(), self.path()) => provider);
                     Ok(Some(Cow::Borrowed(provider.host_header().as_bytes())))
                 } else {
                     Box::pin(self.next_block()).await
@@ -373,7 +399,7 @@ impl<'a> Payload<'a> {
                 if self.host_range.is_some() {
                     #[cfg(debug_assertions)]
                     log::info!(step = "ReadState::AuthHeader"; "current_block:auth_header");
-                    select!(self.host().unwrap() => provider);
+                    select_provider!((self.host().unwrap(), self.path()) => provider);
                     if let Some(auth_header) = provider.auth_header() {
                         Ok(Some(Cow::Borrowed(auth_header.as_bytes())))
                     } else {
@@ -451,7 +477,138 @@ fn get_host(header: Option<&[u8]>) -> Option<&str> {
         })
 }
 
-#[inline]
+pub(crate) fn split_host_path(host: &str) -> (&str, Option<&str>) {
+    if let Some(slash_idx) = host.find('/') {
+        let (host_part, path_part) = host.split_at(slash_idx);
+        (host_part, Some(path_part.trim_end_matches('/')))
+    } else {
+        (host, None)
+    }
+}
+
+pub(crate) fn get_req_path(header: &str) -> Range<usize> {
+    // Extract URL part (between first and second space)
+    let (url_start, url_end) = if let Some(first_whitespace_idx) = header.find(' ') {
+        let second_whitespace_idx = {
+            if let Some(idx) = header[first_whitespace_idx + 1..].find(' ') {
+                first_whitespace_idx + 1 + idx
+            } else {
+                header.len()
+            }
+        };
+        (first_whitespace_idx + 1, second_whitespace_idx)
+    } else {
+        (0, header.len())
+    };
+
+    let url = &header[url_start..url_end];
+    let mut current_offset = url_start;
+
+    // Remove http:// or https:// prefix
+    if url.starts_with("http://") {
+        current_offset += 7;
+    } else if url.starts_with("https://") {
+        current_offset += 8;
+    }
+
+    let url_without_protocol = &header[current_offset..url_end];
+
+    // Find the path part (after the first '/')
+    let Some(path_start_relative) = url_without_protocol.find('/') else {
+        return Default::default();
+    };
+
+    let path_start = current_offset + path_start_relative;
+    let path = &header[path_start..url_end];
+
+    // Remove query parameters (after '?')
+    let path_end = if let Some(question_mark_idx) = path.find('?') {
+        path_start + question_mark_idx
+    } else {
+        path_start + path.len()
+    };
+
+    // Remove fragment (after '#')
+    let final_path_end = if let Some(pound_sign_idx) = header[path_start..path_end].find('#') {
+        path_start + pound_sign_idx
+    } else {
+        path_end
+    };
+
+    path_start..final_path_end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_host_path() {
+        // Test with path
+        let (host, path) = split_host_path("api.openai.com/v1");
+        assert_eq!(host, "api.openai.com");
+        assert_eq!(path, Some("/v1"));
+
+        // Test without path
+        let (host, path) = split_host_path("api.openai.com");
+        assert_eq!(host, "api.openai.com");
+        assert_eq!(path, None);
+
+        // Test with complex path
+        let (host, path) = split_host_path("localhost:8080/api/v1/test");
+        assert_eq!(host, "localhost:8080");
+        assert_eq!(path, Some("/api/v1/test"));
+    }
+
+    #[test]
+    fn test_get_req_path() {
+        // Test basic GET request
+        let header = "GET /v1/completions HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/v1/completions");
+
+        // Test POST request
+        let header = "POST /api/users HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/api/users");
+
+        // Test with query parameters
+        let header = "GET /v1/completions?model=gpt-4 HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/v1/completions");
+
+        // Test with fragment
+        let header = "GET /v1/models#section HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/v1/models");
+
+        // Test root path
+        let header = "GET / HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/");
+
+        // Test with full URL
+        let header = "GET https://api.openai.com/v1/completions HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/v1/completions");
+
+        // Test with http:// prefix
+        let header = "GET http://localhost:8080/api/test HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/api/test");
+
+        // Test complex path with query and fragment
+        let header = "GET /v1/completions?key=value&model=gpt-4#section HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "/v1/completions");
+
+        // Test no path (domain only)
+        let header = "GET https://api.openai.com HTTP/1.1";
+        let range = get_req_path(header);
+        assert_eq!(&header[range], "");
+    }
+}
+
 pub(crate) fn get_auth_query_range(header: &str, key: &str) -> Option<Range<usize>> {
     let url = if let Some(first_whitespace_idx) = header.find(' ') {
         let second_whitespace_idx = {
