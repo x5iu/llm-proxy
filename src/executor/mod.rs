@@ -34,7 +34,8 @@ impl<P: PoolTrait> Executor<P> {
         tokio::spawn(async move {
             loop {
                 let p = crate::program();
-                for provider in p.read().await.providers.iter() {
+                let providers = p.read().await.providers.clone();
+                for provider in providers.iter() {
                     let provider_api_key = || {
                         provider
                             .api_key()
@@ -75,7 +76,8 @@ impl<P: PoolTrait> Executor<P> {
                         provider.set_healthy(false);
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(p.read().await.health_check_interval)).await;
+                let health_check_interval = p.read().await.health_check_interval;
+                tokio::time::sleep(Duration::from_secs(health_check_interval)).await;
             }
         });
     }
@@ -85,8 +87,9 @@ impl<P: PoolTrait> Executor<P> {
         <P as PoolTrait>::Item: Unpin + Send + Sync + 'static,
     {
         let p = crate::program();
+        let tls_server_config = p.read().await.tls_server_config.clone();
         let tls_acceptor =
-            tokio_rustls::TlsAcceptor::from(Arc::clone(&p.read().await.tls_server_config));
+            tokio_rustls::TlsAcceptor::from(tls_server_config);
         let mut tls_stream = match tls_acceptor.accept(stream).await {
             Ok(tls_stream) => tls_stream,
             #[cfg_attr(not(debug_assertions), allow(unused))]

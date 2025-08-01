@@ -59,7 +59,7 @@ pub async fn force_update_config(path: impl AsRef<Path>) -> Result<(), Box<dyn s
 
 pub struct Program {
     tls_server_config: Arc<rustls::ServerConfig>,
-    providers: Vec<Box<dyn Provider>>,
+    providers: Arc<Vec<Box<dyn Provider>>>,
     health_check_interval: u64,
 }
 
@@ -125,7 +125,7 @@ impl Program {
         }
         Ok(Self {
             tls_server_config: Arc::new(tls_server_config),
-            providers,
+            providers: Arc::new(providers),
             health_check_interval: config.health_check_interval.unwrap_or(60),
         })
     }
